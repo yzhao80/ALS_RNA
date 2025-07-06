@@ -1,0 +1,185 @@
+---
+title: "Figure 5: Pathway Analysis"
+author: |
+  | Dr Yue Zhao
+  | Gilbert S. Omenn Department of Computational Medicine and Bioinformatics
+  | University of Michigan
+date: "6/16/2025"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: haddock
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true  
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(readxl)
+library(dplyr)
+library(reshape2)
+library(ComplexHeatmap)
+library(pheatmap)
+library(RColorBrewer)
+library(gdata)
+library(magrittr)
+library(circlize)
+library(ggfortify)
+library(pander)
+library(ggsci)
+library(ggpubr)
+library(gplots)
+library(gridExtra)
+library(tidyverse)
+library(gtsummary)
+library(DT)
+library(knitr)
+library(kableExtra)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(rlang)
+library(factoextra)
+library(car)
+library(pathview)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(openxlsx)
+library(ggh4x)
+library(scales)
+knitr::opts_knit$set(root.dir = "C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/Project/ALS/Manuscript-RNA/Scripts_github/")
+here::i_am("RNA_paper_Fig5.Rmd")
+load("C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/Project/ALS/RNA-seq/CaseVSControl/sample694/RNA_paper_pathway_yesCellPro/plot_no_yes_df3.rda")
+```
+
+
+# Fig.5a 
+
+Enriched KEGG and Hallmark pathways in ALS cases versus controls shared after pathway analysis from primary DEGs (left) and DEGs adjusted (right) for cell proportions, shown overall (grey), in males (green), and females (yellow). Up- and downregulated pathways annotated at the bottom of the dot plot. 
+
+```{r, fig.width=10, fig.height=6, warning=FALSE}
+plot_common <- filter(plot_yes, Description%in%plot_no$Description)
+plot_show <- filter(plot_yes, !(Description%in%plot_no$Description))
+plot_disappear <- filter(plot_no, !(Description%in%plot_yes$Description))
+
+plot_df3_common <- filter(plot_df3, Description%in%plot_common$Description)
+plot_df3_show <- filter(plot_df3, Description%in%plot_show$Description)
+plot_df3_disappear <- filter(plot_df3, Description%in%plot_disappear$Description)
+
+# Calculate the frequency of each Description term for each level of comparison2
+freq_table <- plot_df3_common %>% group_by(Description, comparison2) %>% summarise(freq = n(),.groups = "drop") %>% spread(key = comparison2, value = freq, fill = 0)
+
+# Calculate the difference in frequencies
+freq_table <- freq_table %>% mutate(diff_freq = `Adjust celltype` - `Not adjust celltype`)
+plot_df3_common <- plot_df3_common %>% dplyr::left_join(freq_table %>% dplyr::select(Description, diff_freq), by = "Description")
+
+# Order the data frame based on the difference in frequencies
+plot_df3_common <- plot_df3_common %>%
+  arrange(comparison2,comparison,desc(diff_freq)) %>%
+  filter(!(category == "Hallmark" & Description == "Oxidative phosphorylation"))
+plot_df3_common$Description<-factor(plot_df3_common$Description,levels=unique(plot_df3_common$Description))
+
+# Figure 5A
+ggplot(plot_df3_common, 
+       aes(x=factor(method, levels = c("Up","Down")),
+           y=Description)) + 
+  geom_point(aes(size=Count, color=FDR)) +
+  scale_colour_gradient(low="red", high="blue") +
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45,hjust=0.9,size=12),
+        axis.text.y = element_text(size=12),
+        panel.background = element_rect(fill = "white",
+                                        colour = "white"),
+        panel.border = element_rect(color = "black", 
+                                    fill = NA, 
+                                    linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+                                        colour = "lightgrey")) +
+  scale_y_discrete(limits=rev) +
+  facet_nested(. ~comparison2+comparison) +
+  theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+  theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0))
+```
+
+
+
+# Fig.5b 
+
+Enriched KEGG and Hallmark pathways in ALS cases versus controls that appeared after pathway analysis from DEGs adjusted for cell proportions. 
+
+```{r, fig.width=10, fig.height=5, warning=FALSE}
+plot_df3_show2 <- plot_df3_show %>% filter(FDR<0.0001)
+plot_df3_show3 <- plot_df3_show2
+plot_df3_show3$comparison2 <- "Not adjust celltype"
+plot_df3_show4 <- rbind.data.frame(plot_df3_show3, plot_df3_show2)
+plot_df3_show4$comparison2<-factor(plot_df3_show4$comparison2,levels=c("Not adjust celltype","Adjust celltype"))
+
+ggplot(plot_df3_show4, 
+       aes(x=factor(method, levels = c("Up","Down")),
+           y=Description)) + 
+  geom_point(aes(size = ifelse(comparison2 == "Adjust celltype", Count, NA),
+                 color = ifelse(comparison2 == "Adjust celltype", FDR, NA))) +
+  scale_colour_gradient(name= "FDR", low="red", high="blue") +
+  scale_size_continuous(name = "Count") +
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45,hjust=0.9,size=12),
+        axis.text.y = element_text(size=12),
+        panel.background = element_rect(fill = "white",
+                                        colour = "white"),
+        panel.border = element_rect(color = "black", 
+                                    fill = NA, 
+                                    linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+                                        colour = "lightgrey")) +
+  scale_y_discrete(limits=rev, labels= label_wrap(42)) +
+  facet_nested(. ~comparison2+comparison) +
+  theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+  theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0))
+
+```
+
+# Fig.5c
+
+Enriched KEGG and Hallmark pathways in ALS cases versus controls that disappeared after pathway analysis from DEGs adjusted for cell proportions.
+
+```{r, fig.width=8, fig.height=4,warning=FALSE}
+plot_df3_disappear2<-plot_df3_disappear
+plot_df3_disappear2$comparison2<-"Adjust celltype"
+plot_df3_disappear3<-rbind.data.frame(plot_df3_disappear,plot_df3_disappear2)
+
+
+ggplot(plot_df3_disappear3, 
+       aes(x=factor(method, levels = c("Up","Down")),
+           y=Description)) + 
+  geom_point(aes(size = ifelse(comparison2 == "Not adjust celltype", Count, NA),
+                 color = ifelse(comparison2 == "Not adjust celltype", FDR, NA))) +
+  scale_colour_gradient(name= "FDR", low="red", high="blue") +
+  scale_size_continuous(name = "Count") +
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle=45,hjust=0.9,size=12),
+        axis.text.y = element_text(size=12),
+        panel.background = element_rect(fill = "white",
+                                        colour = "white"),
+        panel.border = element_rect(color = "black", 
+                                    fill = NA, 
+                                    linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+                                        colour = "lightgrey")) +
+  scale_y_discrete(limits=rev) +
+  facet_nested(. ~comparison2+comparison) +
+  theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+  theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0))
+```
+
+

@@ -1,0 +1,756 @@
+---
+title: "ALS RNA Paper Figure 2"
+author: |
+  | Dr Yue Zhao
+  | Gilbert S. Omenn Department of Computational Medicine and Bioinformatics
+  | University of Michigan
+date: "6/13/2025"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: haddock
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(KEGGREST)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gplots)
+library(ggplot2)
+library(ggprism)
+library(ggsci)
+library(ggpubr)
+library(RColorBrewer)
+library(ggridges)
+library(patchwork)
+library(filling)
+library(VIM)
+library(fgsea)
+library(VennDiagram)
+library(clusterProfiler)
+library(ggrepel)
+library(org.Hs.eg.db)
+library(circlize)
+library(ComplexHeatmap)
+load("C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/Project/ALS/RNA-seq/CaseVSControl/sample694/NoCellPro_PC9.rda")
+immnue_cell_markers <- read_excel("C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/Project/ALS/RNA-seq/CaseVSControl/sample694/RNA_paper_pathway_yesCellPro/immune_cell_markers.xlsx", sheet = "FoldChange TPM_TMM", skip = 2)
+
+```
+
+
+# Fig2a: Volcano plot of ALS versus Controls (overall), ALS versus Controls (males), ALS versus Controls (females)
+
+Add immune genes on case vs. controls volcano plots. Immune marker genes were downloaded from the paper by Gianni Monaco et al [pubmed ID: 30726743].
+```{r, fig.width=12, fig.height=4, warning=FALSE}
+library(KEGGREST)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gplots)
+library(ggplot2)
+library(ggprism)
+library(ggsci)
+library(ggpubr)
+library(RColorBrewer)
+library(ggridges)
+library(patchwork)
+library(filling)
+library(VIM)
+library(fgsea)
+library(VennDiagram)
+library(clusterProfiler)
+library(ggrepel)
+library(org.Hs.eg.db)
+library(circlize)
+library(ComplexHeatmap)
+
+# ref scripts: https://github.com/ojziff/als_genome_instability/tree/main/scripts
+theme_oz <- function (xaxis_arrow = TRUE) { 
+    if(xaxis_arrow == TRUE) {
+        theme_bw(base_size=12) %+replace% # theme_bw(base_size=8, base_family="Helvetica") %+replace% 
+            theme(
+                panel.grid = element_blank(),
+                strip.background = element_blank(),
+                #panel.border = element_blank(),
+                axis.line = element_line(arrow = arrow(length = unit(2,"mm"))),
+                # axis.line.y = element_line(arrow = arrow(length = unit(2,"mm"))),
+                #text = element_text(color = "black"), 
+                strip.text = element_text(color = "black"),
+                axis.text = element_text(colour = "black"),
+                axis.ticks = element_line(colour = "black"),
+                panel.background  = element_blank(),
+                plot.background = element_rect(fill="white", colour=NA), 
+                legend.background = element_rect(fill="transparent", colour=NA),
+                legend.key = element_rect(fill="transparent", colour=NA), 
+                strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0)))
+    } else if (xaxis_arrow == FALSE) {
+        theme_bw(base_size=12) %+replace% # theme_bw(base_size=8, base_family="Helvetica") %+replace% 
+            theme(
+                panel.grid = element_blank(),
+                strip.background = element_blank(),
+                #panel.border = element_blank(),
+                # axis.line = element_line(arrow = arrow(length = unit(2,"mm"))),
+                axis.line.y = element_line(arrow = arrow(length = unit(2,"mm"))),
+                #text = element_text(color = "black"), 
+                strip.text = element_text(color = "black"),
+                axis.text = element_text(colour = "black"),
+                axis.ticks = element_line(colour = "black"),
+                panel.background  = element_blank(),
+                plot.background = element_rect(fill="white", colour=NA), 
+                legend.background = element_rect(fill="transparent", colour=NA),
+                legend.key = element_rect(fill="transparent", colour=NA), 
+                strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0)))
+    }
+}
+
+volcano_plot_Fig1 <- function(deseq_res, title = NULL, subtitle = NULL, gene_labels = NULL, transcript_labels = NULL, distinct_labels = FALSE, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2, ymax = 60, xmax = 1, xpos = 0.5, numerator = NULL, denomenator = NULL, arrow_labels = F, 
+                               dpi = 300, significance_threshold = "adj.P.Val", facet_by = NULL, facet_nrow = NULL, facet_ncol = NULL, facet_labeller = "label_value"){
+  deseq_res %<>% mutate(sig = case_when(!!sym(significance_threshold) < 0.01 & abs(logFC) < 0.1 ~ "sig", !!sym(significance_threshold) < 0.01 & abs(logFC) >= 0.1 ~ "sig_strong", !!sym(significance_threshold) >= 0.01 ~ "non_sig"), 
+                        direction = ifelse(logFC > 0, "up", "down"), class = paste(sig, direction), P.Value = case_when(-log10(P.Value) > ymax ~ 10^-ymax, TRUE ~ P.Value), 
+                        mycolor = case_when(gene_symbol %in% gene_highlight_up & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up", gene_symbol %in% gene_highlight_down & logFC < -0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_down", .default = class))
+  deseq_res$mycolor <- factor(deseq_res$mycolor, levels = c("non_sig up", "non_sig down", "highlight_up", "highlight_down", "sig up", "sig_strong up", "sig down", "sig_strong down"))
+  deseq_res %<>% mutate(dot_shape = ifelse(mycolor %in% c("highlight_up", "highlight_down"), 1, 0))
+  deseq_res$dot_shape <- factor(deseq_res$dot_shape, levels=c(0,1))
+  deseq_res %<>% mutate(myfill = case_when(gene_symbol %in% gene_highlight_down & logFC < -0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_down_fill", gene_symbol %in% gene_highlight_up & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up_fill", .default = mycolor))
+  deseq_res$myfill <- factor(deseq_res$myfill, levels = c("non_sig up", "non_sig down", "sig up", "sig_strong up", "sig down", "sig_strong down", "highlight_up", "highlight_down", "highlight_up_fill", "highlight_down_fill"))
+  deseq_res <- deseq_res[order(deseq_res$myfill), ]
+  # de_tally <- deseq_res %>% group_by(sig, direction, class) %>% count() %>% filter(sig != "non_sig") %>% drop_na() %>% mutate(position = ifelse(sig == "sig", xpos, xmax-1), position = ifelse( direction == "down", -1 * position, position), n = formatC(n, format="f", big.mark=",", digits=0)) #%>% 
+  # mutate(P.Value = case_when(-log10(P.Value) < ymax ~ Inf, TRUE ~ P.Value)) %>% # include dots & labels for when P.Value is out of coordinates of ymax
+  plot <- ggplot(deseq_res, aes(x = logFC, y = -log10(P.Value))) +  #geom_point(aes(colour = class ), size = 0.5) +
+    ggrastr::rasterise(geom_point(aes(colour = mycolor, shape = dot_shape, fill= myfill), alpha = 0.8), dpi = dpi) +
+    scale_shape_manual(values = c("0" = 16, "1" = 21)) +
+    scale_colour_manual(values = c("non_sig up" = "gray", "non_sig down" = "gray", 
+                                   "sig up" = "#EB7E56", #"#EB4445",#"#F36F6F",
+                                   "sig_strong up" = "#BC3C29FF",# "#EB4445",
+                                   "sig down" = "#79B1D3", #"#79B1D3", #"#A6CEE3",#"#4F8FC4",
+                                   "sig_strong down" = "#0072B5FF",
+                                   "highlight_up" = "black",
+                                   "highlight_down" = "purple")) +
+    scale_fill_manual(values = c("non_sig up" = "gray", "non_sig down" = "gray", 
+                                 "sig up" = "#EB7E56", #"#EB4445",#"#F36F6F",
+                                 "sig_strong up" = "#BC3C29FF",# "#EB4445",
+                                 "sig down" = "#79B1D3", #"#79B1D3", #"#A6CEE3",#"#4F8FC4",
+                                 "sig_strong down" = "#0072B5FF",
+                                 "highlight_up" = "gray",
+                                 "highlight_down" = "gray",
+                                 "highlight_up_fill" = "#BC3C29FF",
+                                 "highlight_down_fill" = "#0072B5FF")) +
+    #labs(y = expression(-log[10]~P~value), x = paste0("Log2 Fold Change (400",numerator," vs 269",denomenator,")"), title = title, subtitle = subtitle) +
+    labs(y = expression(-log[10]~P~value), x = paste0("Log2 Fold Change"), title = title, subtitle = subtitle) +
+    guides(colour = "none") +
+    scale_y_continuous(expand = c(0,0), limits = c(0,ymax)) + scale_x_continuous(limits = c(-xmax,xmax)) +
+    theme_oz() +  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5), panel.border = element_blank(), axis.ticks = element_line(colour = "black"), legend.position = "none" )
+  # geom_text(fontface = "bold", data = de_tally, aes(x = position, y = ymax - 0.5, label = n, colour = class), size = 2.5 ) +
+  
+  if(!is.null(gene_labels)){
+    if(distinct_labels == TRUE){
+      plot <- plot + geom_text_repel(fontface = "italic", data = distinct(arrange(filter(deseq_res, gene_symbol %in% gene_labels), wt = P.Value), gene_symbol, .keep_all = TRUE), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = Inf, min.segment.length = unit(0, "lines"), size = 2.3)
+    } else if(distinct_labels == FALSE){
+      plot <- plot + geom_text_repel(fontface = "italic", data = filter(deseq_res, gene_symbol %in% gene_labels), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = Inf, min.segment.length = unit(0, "lines"),size = 2.3)
+    }
+  } else if(!is.null(transcript_labels)){
+    plot <- plot + geom_text_repel(fontface = "italic", data = filter(deseq_res, transcript_id %in% transcript_labels), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = 15, min.segment.length = unit(0, "lines"), size = 2.3)
+  }
+  
+  if(arrow_labels == TRUE){
+    t1<-table(deseq_res$class)
+    plot <- plot + 
+      geom_segment(aes(x = xmax*0.25, xend = xmax*0.95, y= ymax*0.88, yend= ymax * 0.88), arrow=arrow(length=unit(0.3,"cm"))) + geom_segment(aes(x = -xmax*0.25, xend = -xmax*0.95, y= ymax*0.88, yend= ymax*0.88),arrow=arrow(length=unit(0.3,"cm"))) +
+      annotate("text", x = xmax*0.6, y = ymax*0.93, label = paste0(t1[[6]]," Up in ",numerator), size = 3) + annotate("text", x = -xmax*0.6, y = ymax*0.93, label = paste0(t1[[5]]," Down in ",denomenator), size = 3)
+  }
+  
+  return(plot)
+}
+
+volcano_plot_Fig2 <- function(deseq_res, title = NULL, subtitle = NULL, gene_labels = NULL, transcript_labels = NULL, distinct_labels = FALSE, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = NULL, gene_highlight_down = NK_markers_v2, ymax = 60, xmax = 1, xpos = 0.5, numerator = NULL, denomenator = NULL, arrow_labels = F, 
+                               dpi = 300, significance_threshold = "adj.P.Val", facet_by = NULL, facet_nrow = NULL, facet_ncol = NULL, facet_labeller = "label_value"){
+  deseq_res %<>% mutate(sig = case_when(!!sym(significance_threshold) < 0.01 & abs(logFC) < 0.1 ~ "sig", !!sym(significance_threshold) < 0.01 & abs(logFC) >= 0.1 ~ "sig_strong", !!sym(significance_threshold) >= 0.01 ~ "non_sig"), 
+                        direction = ifelse(logFC > 0, "up", "down"), class = paste(sig, direction), P.Value = case_when(-log10(P.Value) > ymax ~ 10^-ymax, TRUE ~ P.Value), 
+                        mycolor = case_when(gene_symbol %in% gene_highlight_up & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up", gene_symbol %in% gene_highlight_up2 & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up2", gene_symbol %in% gene_highlight_down & logFC < -0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_down", .default = class))
+  deseq_res$mycolor <- factor(deseq_res$mycolor, levels = c("non_sig up", "non_sig down", "highlight_up", "highlight_up2", "highlight_down", "sig up", "sig_strong up", "sig down", "sig_strong down"))
+  deseq_res %<>% mutate(dot_shape = ifelse(mycolor %in% c("highlight_up", "highlight_up2","highlight_down"), 1, 0))
+  deseq_res$dot_shape <- factor(deseq_res$dot_shape, levels=c(0,1))
+  deseq_res %<>% mutate(myfill = case_when(gene_symbol %in% gene_highlight_down & logFC < -0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_down_fill", gene_symbol %in% gene_highlight_up & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up_fill", gene_symbol %in% gene_highlight_up2 & logFC > 0.1 & !!sym(significance_threshold) < 0.01 ~ "highlight_up_fill2",.default = mycolor))
+  deseq_res$myfill <- factor(deseq_res$myfill, levels = c("non_sig up", "non_sig down", "sig up", "sig_strong up", "sig down", "sig_strong down", "highlight_up", "highlight_up2", "highlight_down", "highlight_up_fill", "highlight_up_fill2", "highlight_down_fill"))
+  deseq_res <- deseq_res[order(deseq_res$myfill), ]
+  # de_tally <- deseq_res %>% group_by(sig, direction, class) %>% count() %>% filter(sig != "non_sig") %>% drop_na() %>% mutate(position = ifelse(sig == "sig", xpos, xmax-1), position = ifelse( direction == "down", -1 * position, position), n = formatC(n, format="f", big.mark=",", digits=0)) #%>% 
+  # mutate(P.Value = case_when(-log10(P.Value) < ymax ~ Inf, TRUE ~ P.Value)) %>% # include dots & labels for when P.Value is out of coordinates of ymax
+  plot <- ggplot(deseq_res, aes(x = logFC, y = -log10(P.Value))) +  #geom_point(aes(colour = class ), size = 0.5) +
+    ggrastr::rasterise(geom_point(aes(colour = mycolor, shape = dot_shape, fill= myfill), alpha = 0.8), dpi = dpi) +
+    scale_shape_manual(values = c("0" = 16, "1" = 21)) +
+    scale_colour_manual(values = c("non_sig up" = "gray", "non_sig down" = "gray", 
+                                   "sig up" = "#EB7E56", #"#EB4445",#"#F36F6F",
+                                   "sig_strong up" = "#BC3C29FF",# "#EB4445",
+                                   "sig down" = "#79B1D3", #"#79B1D3", #"#A6CEE3",#"#4F8FC4",
+                                   "sig_strong down" = "#0072B5FF",
+                                   "highlight_up" = "black",
+                                   "highlight_up2" = "#3333FF",
+                                   "highlight_down" = "purple")) +
+    scale_fill_manual(values = c("non_sig up" = "gray", "non_sig down" = "gray", 
+                                 "sig up" = "#EB7E56", #"#EB4445",#"#F36F6F",
+                                 "sig_strong up" = "#BC3C29FF",# "#EB4445",
+                                 "sig down" = "#79B1D3", #"#79B1D3", #"#A6CEE3",#"#4F8FC4",
+                                 "sig_strong down" = "#0072B5FF",
+                                 "highlight_up" = "gray",
+                                 "highlight_up2" = "gray",
+                                 "highlight_down" = "gray",
+                                 "highlight_up_fill" = "#BC3C29FF",
+                                 "highlight_up_fill2" = "#BC3C29FF",
+                                 "highlight_down_fill" = "#0072B5FF")) +
+    labs(y = expression(-log[10]~P~value), x = paste0("Log2 Fold Change"), title = title, subtitle = subtitle) +
+    guides(colour = "none") +
+    scale_y_continuous(expand = c(0,0), limits = c(0,ymax)) + scale_x_continuous(limits = c(-xmax,xmax)) +
+    theme_oz() +  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5), panel.border = element_blank(), axis.ticks = element_line(colour = "black"), legend.position = "none" )
+  
+  if(!is.null(gene_labels)){
+    if(distinct_labels == TRUE){
+      plot <- plot + geom_text_repel(fontface = "italic", data = distinct(arrange(filter(deseq_res, gene_symbol %in% gene_labels), wt = P.Value), gene_symbol, .keep_all = TRUE), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = Inf, min.segment.length = unit(0, "lines"), size = 2.3)
+    } else if(distinct_labels == FALSE){
+      plot <- plot + geom_text_repel(fontface = "italic", data = filter(deseq_res, gene_symbol %in% gene_labels), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = Inf, min.segment.length = unit(0, "lines"),size = 2.3)
+    }
+  } else if(!is.null(transcript_labels)){
+    plot <- plot + geom_text_repel(fontface = "italic", data = filter(deseq_res, transcript_id %in% transcript_labels), aes(x = logFC, y = -log10(P.Value), label = gene_symbol), max.overlaps = 15, min.segment.length = unit(0, "lines"), size = 2.3)
+  }
+  
+  if(arrow_labels == TRUE){
+    t1<-table(deseq_res$class)
+    plot <- plot + 
+      geom_segment(aes(x = xmax*0.25, xend = xmax*0.95, y= ymax*0.88, yend= ymax * 0.88), arrow=arrow(length=unit(0.3,"cm"))) + geom_segment(aes(x = -xmax*0.25, xend = -xmax*0.95, y= ymax*0.88, yend= ymax*0.88),arrow=arrow(length=unit(0.3,"cm"))) +
+      annotate("text", x = xmax*0.6, y = ymax*0.93, label = paste0(t1[[6]]," Up in ",numerator), size = 3) + annotate("text", x = -xmax*0.6, y = ymax*0.93, label = paste0(t1[[5]]," Down in ",denomenator), size = 3)
+  }
+  
+  return(plot)
+}
+
+neutrophil_markers<- immnue_cell_markers %>% dplyr::arrange(desc(`Neutrophils LD`)) %>% dplyr::slice(1:100) %>% dplyr::select(`Gene name`) %>% t() %>% as.data.frame() %>% dplyr::mutate(geneset="neutrophile markers")
+NK_markers<-immnue_cell_markers %>% dplyr::arrange(desc(`NK`)) %>% dplyr::slice(1:100) %>% dplyr::select(`Gene name`)%>% t() %>% as.data.frame() %>% dplyr::mutate(geneset="NK markers")
+
+vol_data <- NoCellPro.PC9.all.list[["deg"]]
+vol_data_filtered <- vol_data %>%
+  group_by(gene_symbol) %>%
+  dplyr::slice(which.max(AveExpr)) %>%
+  ungroup()
+
+neutrophil_markers_v <-t(neutrophil_markers)
+neutrophil_markers_v2 <- NoCellPro.PC9.all.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, gene_symbol %in% c(neutrophil_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+NK_markers_v <-t(NK_markers)
+NK_markers_v2 <- NoCellPro.PC9.all.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, diffexpressed == "DOWN", gene_symbol %in% c(NK_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+
+als_volcano <- volcano_plot_Fig1(NoCellPro.PC9.all.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2, subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = c(neutrophil_markers_v2, NK_markers_v2))
+
+als_volcano2 <- volcano_plot_Fig1(NoCellPro.PC9.all.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2,
+                                 subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+
+als_volcano
+
+neutrophil_markers_v2 <- NoCellPro.PC9.male.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, gene_symbol %in% c(neutrophil_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+NK_markers_v2 <- NoCellPro.PC9.male.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, diffexpressed == "DOWN", gene_symbol %in% c(NK_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+
+als_volcano_m <- volcano_plot_Fig1(NoCellPro.PC9.male.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2,
+                                   subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+
+neutrophil_markers_v2 <- NoCellPro.PC9.female.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, gene_symbol %in% c(neutrophil_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+NK_markers_v2 <- NoCellPro.PC9.female.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, diffexpressed == "DOWN", gene_symbol %in% c(NK_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+als_volcano_f <- volcano_plot_Fig1(NoCellPro.PC9.female.list[["deg"]], numerator = "ALS", denomenator = "Control", distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2,
+                                   subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = c(neutrophil_markers_v2, NK_markers_v2))
+als_volcano_f <- volcano_plot_Fig1(NoCellPro.PC9.female.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_down = NK_markers_v2,
+                                   subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+cowplot::plot_grid(als_volcano2, als_volcano_m,als_volcano_f, ncol=3)
+```
+
+## Add qPCR genes (red dots with blue outline) on case vs. controls volcano plots.
+
+```{r, fig.width=12, fig.height=4, warning=FALSE}
+# qPCR genes
+qPCR_gene <- c("CAPZA1","B2M","RPS18","TNFSF10","TPT1")
+
+# Check for overlap
+common_genes <- intersect(qPCR_gene, neutrophil_markers_v2)
+common_genes <- intersect(qPCR_gene, NK_markers_v2)
+common_genes <- intersect(qPCR_gene, NoCellPro.PC9.all.list[["deg"]]$gene_symbol)
+
+if (length(common_genes) > 0) {
+    print(paste("Common genes:", paste(common_genes, collapse = ", ")))
+} else {
+    print("No common genes found.")
+}
+
+als_volcano_r1 <- volcano_plot_Fig2(NoCellPro.PC9.all.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+
+als_volcano_r1_label <- volcano_plot_Fig2(NoCellPro.PC9.all.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = qPCR_gene)
+
+neutrophil_markers_v2 <- NoCellPro.PC9.male.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, gene_symbol %in% c(neutrophil_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+NK_markers_v2 <- NoCellPro.PC9.male.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, diffexpressed == "DOWN", gene_symbol %in% c(NK_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+als_volcano_r1_m <- volcano_plot_Fig2(NoCellPro.PC9.male.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+
+als_volcano_r1_m_label <- volcano_plot_Fig2(NoCellPro.PC9.male.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = qPCR_gene)
+
+neutrophil_markers_v2 <- NoCellPro.PC9.female.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, gene_symbol %in% c(neutrophil_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+NK_markers_v2 <- NoCellPro.PC9.female.list[["deg"]] %>% filter(adj.P.Val < 0.01, abs(logFC)>0.1, diffexpressed == "DOWN", gene_symbol %in% c(NK_markers_v)) %>% distinct(gene_symbol) %>% pull(gene_symbol)
+als_volcano_r1_f <- volcano_plot_Fig2(NoCellPro.PC9.female.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = NULL)
+
+als_volcano_r1_f_label <- volcano_plot_Fig2(NoCellPro.PC9.female.list[["deg"]], numerator = NULL, denomenator = NULL, distinct_labels = TRUE, arrow_labels = F, gene_highlight_up = neutrophil_markers_v2, gene_highlight_up2 = qPCR_gene, gene_highlight_down = NK_markers_v2,
+    subtitle = NULL, ymax = 60, xmax = 1, dpi = 300, gene_labels = qPCR_gene)
+
+# Fig2a
+cowplot::plot_grid(als_volcano_r1, als_volcano_r1_m,als_volcano_r1_f, ncol=3)
+```
+
+## Add the lables of qPCR genes (red dots with blue outline).
+
+```{r, fig.width=12, fig.height=4, warning=FALSE}
+cowplot::plot_grid(als_volcano_r1_label, als_volcano_r1_m_label,als_volcano_r1_f_label, ncol=3)
+```
+
+# Fig2b: Scatter plot of male log2-FC versus female log2-FC for overall significant genes
+
+```{r, fig.width=4, fig.height=4, warning=FALSE}
+deg.all<-NoCellPro.PC9.all.list[["deg"]]
+heatmap_deg2 <- deg.all %>% filter(adj.P.Val<0.01) %>% filter(abs(logFC)>0.1)
+deg.df<-heatmap_deg2
+heatmap_deg2 <-heatmap_deg2[order(heatmap_deg2$logFC,decreasing=T),]
+heatmap_deg2_unique <- heatmap_deg2[!duplicated(heatmap_deg2$gene_symbol), ]
+deg.male<-NoCellPro.PC9.male.list[["deg"]]
+deg.female<-NoCellPro.PC9.female.list[["deg"]]
+deg.combine<-left_join(heatmap_deg2_unique,deg.male,by="geneid")
+deg.combine2<-left_join(deg.combine,deg.female,by="geneid")
+deg.combine2$DEG<-factor(deg.combine2$diffexpressed.x, levels=c("UP", "DOWN"))
+
+# logFC.x is overall, logFC.y is male, logFC is female
+p<-ggplot(deg.combine2, aes(x=logFC.y, y=logFC, fill=DEG)) +
+    geom_point(shape=21,size=2,stroke=1.2, alpha = 0.5) +  # Use hollow circles
+    xlim(c(-2,2)) +         
+    ylim(c(-2,2)) +         
+    coord_fixed() +          
+    scale_fill_manual(values=c("UP"="#E41A1C", "DOWN"="#377EB8")) +
+    geom_abline(intercept=0, slope=1, linetype="dashed", color="black") + 
+    labs(x = "Log2 Fold Change in Males", y = "Log2 Fold Change in Females") + 
+    theme_bw() +
+    theme(
+        panel.grid = element_blank(),   # Remove grid lines
+        panel.border = element_blank(), # Remove box around the plot
+        axis.line = element_line(color = "black"),
+        text = element_text(size = 16),
+        legend.position = "bottom"
+    ) + 
+    theme(legend.justification = c(1, 0), legend.position = c(1, 0)) # Position legend to lower right corner
+
+
+# Label genes in scatter plot
+gene_labels_df <- filter(deg.combine2, abs(logFC.y)> 0.8 | abs(logFC) > 0.8)
+gene_labels <- gene_labels_df$gene_symbol.x
+p_label <- p + geom_text_repel(fontface = "italic", data = distinct(arrange(filter(deg.combine2, gene_symbol %in% gene_labels), wt = P.Value.x), gene_symbol, .keep_all = TRUE), aes(x=logFC.y, y=logFC, label = gene_symbol), max.overlaps = Inf, min.segment.length = unit(0, "lines"), size = 2.3)
+p_label
+```
+
+# Fig2c: Heatmap
+
+```{r, fig.width=12, fig.height=6, warning=FALSE}
+process_data <- function(deseq_res, ymax = 60, xmax = 1.1, significance_threshold = "adj.P.Val"){
+    deseq_res %<>% mutate(sig = case_when(!!sym(significance_threshold) < 0.01 & abs(logFC) < 0.1 ~ "sig", !!sym(significance_threshold) < 0.01 & abs(logFC) >= 0.1 ~ "sig_strong", !!sym(significance_threshold) >= 0.01 ~ "non_sig"), 
+        direction = ifelse(logFC > 0, "up", "down"), class = paste(sig, direction), logFC = case_when(logFC > xmax ~ Inf, logFC < -xmax ~ -Inf, TRUE ~ logFC), P.Value = case_when(-log10(P.Value) > ymax ~ 10^-ymax, TRUE ~ P.Value))
+    deseq_res<-filter(deseq_res,sig=="sig_strong")
+    deseq_res %<>%arrange(adj.P.Val)
+}
+
+all_deg<-process_data(NoCellPro.PC9.all.list[["deg"]])
+male_deg<- process_data(NoCellPro.PC9.male.list[["deg"]])
+female_deg<- process_data(NoCellPro.PC9.female.list[["deg"]])
+
+all_deg_top10_down<-all_deg %>% filter(direction=="down") %>% top_n(10,-adj.P.Val)
+male_deg_top10_down<-male_deg%>% filter(direction=="down") %>% top_n(10,-adj.P.Val)
+female_deg_top10_down<-female_deg%>% filter(direction=="down") %>% top_n(10,-adj.P.Val)
+
+all_deg_top10_up<-all_deg %>% filter(direction=="up") %>% top_n(10,-adj.P.Val)
+male_deg_top10_up<-male_deg %>% filter(direction=="up") %>% top_n(10,-adj.P.Val)
+female_deg_top10_up<-female_deg %>% filter(direction=="up") %>% top_n(10,-adj.P.Val)
+
+# remove 2nd appearance of deg
+heatmap_deg_combined <-rbind.data.frame(all_deg_top10_up,all_deg_top10_down)
+heatmap_deg_combined_unique <- heatmap_deg_combined[!duplicated(heatmap_deg_combined$geneid), ]
+
+# lcpm_df_filtered, scores_meta
+design <- model.matrix(~ 1 + Batch + library_type + PC2 + PC4 + PC5, data = scores_meta)
+
+residual_exprs <- apply(lcpm_filtered, 1, function(gene_expr) {
+    fit <- lm.fit(design, gene_expr)
+    residuals(fit)
+})
+lcpm<-t(residual_exprs)
+
+scores_meta$subject_type<-factor(scores_meta$subject_type,levels=c("case","control"))
+scores_meta_sorted <- scores_meta[order(scores_meta$subject_type, scores_meta$sex), ]
+heatmap_lcpm_p1<-lcpm[match(heatmap_deg_combined_unique$geneid, row.names(lcpm)),match(scores_meta$Sample,colnames(lcpm))]
+
+# scale by rows, transform to Z-scale
+mat.z <- t(scale(t(data.matrix(heatmap_lcpm_p1))))
+row.names(mat.z)<-heatmap_deg_combined_unique$gene_symbol
+mat.z.df <- as.data.frame(mat.z)
+col_fun = colorRamp2(c(-4, 0, 4), c("#377EB8", "white", "#E41A1C"))
+
+# heatmap header
+subject_type<-scores_meta$subject_type
+sex<-scores_meta$sex
+direction<-heatmap_deg_combined_unique$direction
+scores_meta$sex_group <- paste(scores_meta$subject_type, scores_meta$sex, sep = "_")
+sex_group<-scores_meta$sex_group
+
+ha = HeatmapAnnotation(Subject_type=subject_type, Sex = sex,
+    col = list(Subject_type = c("case" = "#6D489E","control" = "#808184"), Sex=c("M" = "#92D050","F" = "#F6EB17")), 
+    annotation_legend_param = list(Subject_type = list(title = "Subject type"),Sex = list(title = "Sex")))
+
+ht_fig5 <- Heatmap(mat.z, name = "Gene Expression in LogCPM", 
+    cluster_rows = F,
+    cluster_columns = F,
+    show_row_dend = FALSE,
+    show_column_dend = FALSE,
+    top_annotation = ha,
+    col=col_fun,
+    # na_col = "#fffbff",
+    show_row_names = T,
+    show_column_names = FALSE,
+    #column_split = factor(subject_type, levels = c("case", "control")),
+    column_split = factor(sex_group, levels = c("case_M","case_F", "control_M","control_F")),
+    row_split=factor(direction,levels=c("up","down")),
+    column_gap = unit(1, "mm"),border = TRUE
+) 
+
+print(ht_fig5)
+```
+
+# Fig2d,e: Venn diagram to compare with DEGs in literature
+
+```{r,fig.width=10, fig.height=5, warning=FALSE}
+all_deg_sig<-filter(all_deg,sig=="sig_strong")
+
+# compare with previous DEGs with directions
+all_deg_sig_up<-filter(all_deg_sig, logFC>0)
+all_deg_sig_down<-filter(all_deg_sig, logFC<0)
+DEG_2023_up <- filter(DEG_2023, logFC>0)
+DEG_2023_down <- filter(DEG_2023, logFC<0)
+DEG_2019_up <- filter(DEG_2019, `FC (ALS/CTL)`>1)
+DEG_2019_down <- filter(DEG_2019, `FC (ALS/CTL)`<1)
+
+par(mfrow = c(1, 2))
+compare_list6_up<-list(our_study=unique(all_deg_sig_up$gene_symbol),DEG_2019_up=unique(DEG_2019_up$Symbol),DEG_2023_up=unique(DEG_2023_up$Gene_Symbol))
+compare_list6_up_venn<-venn(compare_list6_up)
+overlap_liter_up<-c(attr(compare_list6_up_venn,"intersections")$`our_study:DEG_2019_up:DEG_2023_up`, attr(compare_list6_up_venn,"intersections")$`our_study:DEG_2019_up`, attr(compare_list6_up_venn,"intersections")$`our_study:DEG_2023_up`)
+
+compare_list7_down<-list(our_study=unique(all_deg_sig_down$gene_symbol),DEG_2019_down=unique(DEG_2019_down$Symbol),DEG_2023_down=unique(DEG_2023_down$Gene_Symbol))
+compare_list7_down_venn<-venn(compare_list7_down)
+overlap_liter_down<-c(attr(compare_list7_down_venn,"intersections")$`our_study:DEG_2019_down:DEG_2023_down`, attr(compare_list7_down_venn,"intersections")$`our_study:DEG_2019_down`, attr(compare_list7_down_venn,"intersections")$`our_study:DEG_2023_down`)
+overlap_liter<-c(overlap_liter_up,overlap_liter_down)
+deg.overlap.liter<-filter(all_deg,gene_symbol%in%overlap_liter)
+# Note: DEG up unique to our study reduced 6, DEG down unique to our study reduced 3. 
+# This is because 6 gene symbols, each has different ENSEMBL IDs corresponding to different transcript type, length, and opposite direction. Since the down DEG has higher AveExp, the up DEG is filtered.
+# 3 gene symbols, each has several ENSEMBL IDs corresponding to different transcript type, length, and opposite direction. Since the up DEG has higher AveExp, the down DEG is filtered.
+# Details see "Fig1f,g,h: uniqe and consistent DEGs".
+```
+
+# Fig2f,g,h: Uniqe and consistent DEGs between our study and literature.
+
+```{r,fig.width=12, fig.height=4, warning=FALSE}
+process_df <- function(data_frame) {
+    filtered_df <- data_frame %>%
+        group_by(gene_symbol) %>%
+        filter(AveExpr == max(AveExpr)) %>%
+        ungroup()}
+
+all_deg_dedup<-process_df(all_deg)
+dups<-all_deg[duplicated(all_deg$gene_symbol)==TRUE, ] #89 duplicated gene_symbols
+freq_table_dups <- dups %>%
+    group_by(gene_symbol) %>%
+    summarise(freq = n()) %>%
+    arrange(desc(freq))
+duplicatedSymbol<-all_deg[duplicated(all_deg$gene_symbol)==TRUE, "gene_symbol"]
+
+deg.overlap.liter<-filter(all_deg_dedup,gene_symbol%in%overlap_liter)
+
+deg.overlap.liter.up<-filter(all_deg_dedup,gene_symbol%in%overlap_liter_up)
+deg.overlap.liter.down<-filter(all_deg_dedup,gene_symbol%in%overlap_liter_down)
+deg.uniq.up<-all_deg_dedup%>%filter(direction=="up"&(!gene_symbol%in%overlap_liter_up))
+deg.uniq.down<-all_deg_dedup%>%filter(direction=="down"&(!gene_symbol%in%overlap_liter_down))
+
+# for excel
+# deg.uniq.up[(deg.uniq.up$gene_symbol %in% duplicatedSymbol)==T,]
+
+deg.overlap.liter.up$group <- "consistent"
+deg.overlap.liter.down$group <- "consistent"
+deg.uniq.up$group <- "uniq"
+deg.uniq.down$group <- "uniq"
+
+uniq_up<-attr(compare_list6_up_venn,"intersections")$our_study
+# setdiff(uniq_up,deg.uniq.up$gene_symbol)
+#"UBL7-DT"   "FASN"      "GMPR"      "LINC01220" "U1"        "LINC02325" 
+# 6 gene symbols, each has different ENSEMBL IDs corresponding to different transcript type, length, and opposite direction. Since the down DEG has higher AveExp, the up DEG is filtered.
+uniq_down<-attr(compare_list7_down_venn,"intersections")$our_study
+# setdiff(uniq_down,deg.uniq.down$gene_symbol)
+# "Y_RNA"   "PCAT1"   "PRDX3P1"
+# 3 gene symbols, each has several ENSEMBL IDs corresponding to different transcript type, length, and opposite direction. Since the up DEG has higher AveExp, the down DEG is filtered.
+
+long.up <- rbind.data.frame(deg.overlap.liter.up,deg.uniq.up)
+long.down<- rbind.data.frame(deg.overlap.liter.down,deg.uniq.down)
+long <- rbind.data.frame(long.up,long.down)
+long$logP <- -1*(log10(long$P.Value))
+
+# Fig1f, supp fig.S2a
+long1 <-ggplot(long, aes(x=AveExpr, color=group)) +
+    geom_density(linewidth = 1.2) +
+    # facet_wrap(~factor(direction,levels=c("up","down"))) +
+    theme(#axis.title.x = element_blank(),
+        axis.title.x = element_text(size=12),
+        axis.text.y = element_text(size=12),
+        axis.text.x = element_text(size=12),
+        #  axis.text.y = ggtext::element_markdown(colour = rev(col.vec5)),
+        panel.background = element_rect(fill = "white",
+            colour = "white"),
+        panel.border = element_rect(color = "black", 
+            fill = NA, 
+            linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+            colour = "white")) +
+    theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0)) +
+    theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+    theme(panel.spacing = unit(1.2, "lines"),legend.position="none") +
+    scale_color_manual(values=c("#FF00FF", "#66FFFF"))
+
+# Fig1h, supp fig.S2b
+long2<-ggplot(long, aes(x=logFC, color=group)) +
+    geom_density(linewidth = 1.2) +
+    # facet_wrap(~factor(direction,levels=c("up","down"))) +
+    theme(#axis.title.x = element_blank(),
+        axis.title.x = element_text(size=12),
+        axis.text.y = element_text(size=12),
+        axis.text.x = element_text(size=12),
+        #  axis.text.y = ggtext::element_markdown(colour = rev(col.vec5)),
+        panel.background = element_rect(fill = "white",
+            colour = "white"),
+        panel.border = element_rect(color = "black", 
+            fill = NA, 
+            linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+            colour = "white")) +
+    theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+    theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0)) +
+    theme(panel.spacing = unit(1.2, "lines"),legend.position="none") +
+    scale_x_continuous(limits=c(-0.5,0.5)) +
+    scale_color_manual(values=c("#FF00FF", "#66FFFF"))
+
+# Fig1g, supp fig.S2c
+long3<-ggplot(long, aes(x=logP, color=group)) +
+    geom_density(linewidth = 1.2) +
+    # facet_wrap(~factor(direction,levels=c("up","down"))) +
+    theme(#axis.title.x = element_blank(),
+        axis.title.x = element_text(size=12),
+        axis.text.y = element_text(size=12),
+        axis.text.x = element_text(size=12),
+        #  axis.text.y = ggtext::element_markdown(colour = rev(col.vec5)),
+        panel.background = element_rect(fill = "white",
+            colour = "white"),
+        panel.border = element_rect(color = "black", 
+            fill = NA, 
+            linewidth = 1),
+        panel.grid.major = element_line(linewidth = 0.25, linetype = 'solid',
+            colour = "white")) +
+    theme(strip.background=element_rect(color="grey30", fill="grey90")) +
+    theme(strip.text.x = element_text(size = 12, colour = "black", angle = 0)) +
+    theme(panel.spacing = unit(1.2, "lines"),legend.position="none") +
+    scale_color_manual(values=c("#FF00FF", "#66FFFF"))
+
+p_print<-cowplot::plot_grid(long1,long3,long2, ncol=3, labels = LETTERS[1:3])
+p_print
+
+```
+# Supplementary Fig S1a-b: 2×2 contingency tables for up- and downregulated DEGs from our dataset with Swindell et al. (top) and Grima et al. (bottom) datasets.
+
+```{r,fig.width=8, fig.height=4, warning=FALSE}
+mat <- matrix(c(381, 1547,
+    371, 5210),
+    nrow = 2,
+    byrow = F,
+    dimnames = list(
+        c("Up_in_Swindell", "Not_up_in_Swindell"),
+        c("Up_in_our",       "Not_up_in_our")
+    ))
+
+# view contingency table
+print(mat)
+
+# Fisher's exact test (enrichment of Swindell‐up genes in our up‐regulated set)
+fisher.res <- fisher.test(mat, alternative = "g")
+print(fisher.res)
+
+# extract odds ratio and p‐value
+odds_ratio <- fisher.res$estimate
+fisher.res[["p.value"]] # 1.311662e-54
+
+####################################################
+mat <- matrix(
+    c(267, 1357,
+        497, 5388),
+    nrow = 2,
+    byrow = F,
+    dimnames = list(
+        c("Down_in_Swindell", "Not_down_in_Swindell"),
+        c("Down_in_our",      "Not_down_in_our")
+    )
+)
+
+# View the table
+print(mat)
+
+# Fisher's exact test for enrichment of Swindell-down genes among our down-regulated genes
+fisher.res <- fisher.test(mat, alternative = "greater")
+
+# Show full test result
+print(fisher.res)
+
+# Extract odds ratio and p-value
+odds_ratio <- fisher.res$estimate
+fisher.res[["p.value"]] # 2.222023e-19
+
+###################################################
+
+mat <- matrix(
+    c(39, 1889,
+        46, 9893),
+    nrow = 2,
+    byrow = F,
+    dimnames = list(
+        c("Up_in_Grima",       "Not_up_in_Grima"),
+        c("Up_in_our",         "Not_up_in_our")
+    )
+)
+
+# View the table
+print(mat)
+
+# Fisher's exact test for enrichment of Grima-up genes among our up-regulated genes
+fisher.res <- fisher.test(mat, alternative = "greater")
+
+# Show the full test result
+print(fisher.res)
+
+###################################################
+# Construct the contingency table:
+#                           Down_in_our  Not_down_in_our
+# Down_in_Grima                   56             1568
+# Not_down_in_Grima              104            10139
+
+mat <- matrix(
+    c(56, 1568,
+        104, 10139),
+    nrow = 2,
+    byrow = F,
+    dimnames = list(
+        c("Down_in_Grima",      "Not_down_in_Grima"),
+        c("Down_in_our",        "Not_down_in_our")
+    )
+)
+
+# View the table
+print(mat)
+
+# Fisher's exact test for enrichment of Grima-down genes among our down-regulated genes
+fisher.res <- fisher.test(mat, alternative = "greater")
+
+# Show full test result
+print(fisher.res)
+```
+
+# Supplementary Fig S2e: Scatter plot of log2FC in our study vs. in literature for overlapped DEGs
+
+```{r,fig.width=8, fig.height=4, warning=FALSE}
+# out of all overlapped literature genes, how many are consistent in directional changes?
+# 2019
+# overlapped DEGs
+DEG_2019$logFC<-log2(DEG_2019$`FC (ALS/CTL)`)
+DEG_own_2019 <- list(our=unique(all_deg_sig$gene_symbol),DEG_2019=unique(DEG_2019$Symbol))
+venn_2019<-venn(DEG_own_2019,show.plot = F)
+venn_2019_common <- attr(venn_2019,"intersections")$`our:DEG_2019`
+deg.common.2019 <- filter(all_deg_sig, gene_symbol %in% venn_2019_common)
+
+ploto_data_2019 <- deg.common.2019 %>%
+    dplyr::select(gene_symbol, logFC) %>%
+    dplyr::rename(logFC_own = logFC) %>%
+    dplyr::inner_join(
+        DEG_2019 %>% 
+            dplyr::select(Symbol, logFC) %>% 
+            dplyr::rename(logFC_2019 = logFC),
+        by = c("gene_symbol" = "Symbol")
+    ) %>%
+    dplyr::group_by(gene_symbol) %>%
+    dplyr::filter(
+        # if duplicates AND any match, keep only the matching
+        if (n() > 1 && any(logFC_own * logFC_2019 > 0)) {
+            logFC_own * logFC_2019 > 0
+        } else {
+            TRUE
+        }
+    ) %>%
+    dplyr::slice_max(abs(logFC_own), n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+        DEG = ifelse(logFC_own > 0, "UP", "DOWN"),
+        DEG = factor(DEG, levels = c("UP", "DOWN"))
+    )
+
+DEG_own_2023 <- list(our=unique(all_deg_sig$gene_symbol),DEG_2023=unique(DEG_2023$Gene_Symbol))
+venn_2023<-venn(DEG_own_2023,show.plot=F)
+venn_2023_common <- attr(venn_2023,"intersections")$`our:DEG_2023`
+deg.common.2023 <- filter(all_deg_sig, gene_symbol %in% venn_2023_common)
+
+ploto_data_2023 <- deg.common.2023 %>%
+    dplyr::select(gene_symbol, logFC) %>%
+    dplyr::rename(logFC_own = logFC) %>%
+    dplyr::inner_join(
+        DEG_2023 %>% dplyr::select(Gene_Symbol, logFC) %>% dplyr::rename(logFC_2023 = logFC),
+        by = c("gene_symbol"="Gene_Symbol")) %>%
+    dplyr::mutate(DEG = ifelse(logFC_own > 0, "UP", "DOWN"),
+        DEG = factor(DEG, levels = c("UP", "DOWN")))
+
+plot_pair <- function(df, yvar, ylab) {
+    ggplot(df, aes(x = logFC_own, y = .data[[yvar]], fill = DEG)) +
+        geom_point(shape = 21, size = 2, stroke = 1.2, alpha = 0.5) +
+        xlim(-1, 1) + ylim(-1, 1) +
+        coord_fixed() +
+        scale_fill_manual(values = c("UP" = "#E41A1C", "DOWN" = "#377EB8")) +
+        geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+        labs(x = "logFC (Our study)", y = ylab) +
+        theme_bw() +
+        theme(
+            panel.grid    = element_blank(),
+            panel.border  = element_blank(),
+            axis.line     = element_line(color = "black"),
+            text          = element_text(size = 16),
+            legend.position      = "bottom",
+            legend.justification = c(1, 0)
+        )
+}
+
+p3 <- plot_pair(ploto_data_2019, "logFC_2019", "logFC (DEG_2019)")
+p4 <- plot_pair(ploto_data_2023, "logFC_2023", "logFC (DEG_2023)")
+
+p3 + p4
+
+# Pearson correlations
+t1<-cor.test(ploto_data_2019$logFC_own, ploto_data_2019$logFC_2019, method = "pearson")
+t1
+
+t2<-cor.test(ploto_data_2023$logFC_own, ploto_data_2023$logFC_2023, method = "pearson")
+t2
+```
+

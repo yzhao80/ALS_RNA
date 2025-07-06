@@ -1,0 +1,1185 @@
+---
+title: "Differential expression analysis: ALS vs Control"
+author: |
+  | Dr Yue Zhao
+  | Gilbert S. Omenn Department of Computational Medicine and Bioinformatics
+  | University of Michigan
+date: "6/11/2025"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: haddock
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true  
+---
+
+```{r setup, include=FALSE}
+library(here)
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(ComplexHeatmap)
+library(pheatmap)
+library(RColorBrewer)
+library(gdata)
+library(magrittr)
+library(circlize)
+library(ggfortify)
+library(pander)
+library(ggsci)
+library(ggpubr)
+library(gplots)
+library(gridExtra)
+library(tidyverse)
+library(gtsummary)
+library(DT)
+library(knitr)
+library(kableExtra)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(rlang)
+library(factoextra)
+library(sva)
+library(car)
+library(pathview)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+knitr::opts_knit$set(root.dir = "C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/Project/ALS/RNA-seq/")
+here::i_am("ALS_DEG.Rmd")
+```
+
+
+# 1. Workflow overview 
+1) Remove duplicated samples, samples with wrong sex
+2) Remove 13 globin genes
+3) Filter low expressed genes 
+4) TMM
+5) Remove library specific genes
+6) Derive principal components (PCs): regress out case-control status, sex, and age from expression data; use the residual to generate PCs; check correlations between PCs and case status.
+7) Differential expression testing was performed using linear models and moderated t-statistics in the limma R package.
+Design model1: y ~ group + age + sex + Genetic_PC1 + Genetic_PC2 + Genetic_PC3 + Genetic_PC4 + batch + prep + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10. This design controls for technical variation due to library preparation and other unwanded variance. 
+
+Design model2: y ~ group + age + sex + Genetic_PC1 + Genetic_PC2 + Genetic_PC3 + Genetic_PC4 + batch + prep + PC2 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10 + CD8T + Mono + NK + BCell + Neu. This design controls for technical variation due to library preparation, and controls for variation due to cell type proportions (CD8T, Mono, NK, BCell, and Neu), genetic heterogeneity (PC1 ~ PC4), other technical variance not captured by lib_type, batch. CD4T was removed from the model due to large VIF. 
+
+```{r warning=FALSE}
+# RNA-seq data
+load("./CaseVSControl/sample694/deg.case.control.sample694_nobatch.rda")
+mx<-deg.case.control.sample694.nobatch[["df"]]
+mx.df<-as.data.frame(mx)
+# meta data
+load("meta.rda")
+```
+
+
+
+# 2. Remove library specific genes
+
+```{r,warning=FALSE}
+dm<-mx[, match(meta$Sample,colnames(mx))]
+genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+target<-row.names(dm)
+genes <- genes[match(target,genes$geneid),]
+samplenames <- factor(meta$Sample)
+group <- factor(meta$subject_type, levels = c("control", "case"))
+dm3<-as.matrix(dm)
+y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+y3 <- calcNormFactors(y, method = "TMM")
+lcpm<- cpm(y3,log=T)
+lcpm_df<-as.data.frame(lcpm)
+```
+
+
+```{r, fig.width=12, fig.height=4, warning=FALSE}
+run_limma_voom <- function(df,meta) {
+  dm<-df[, match(meta$Sample,colnames(df))]
+  genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+  gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+  colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+  genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+  target<-row.names(df)
+  genes <- genes[match(target,genes$geneid),]
+  samplenames <- factor(meta$Sample)
+  group <- factor(meta$subject_type, levels = c("control", "case"))
+  dm3<-as.matrix(dm)
+  y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+  y3 <- calcNormFactors(y, method = "TMM")
+  tmm <- cpm(y3)
+  tmmLog2<-log2(tmm+1)
+  
+  #DE
+  sex<-factor(meta$sex)
+  batch<-factor(meta$Batch, levels = c("Run5","pilot","Run1","Run2","Run3","Run4","Run6", "Run789"))
+  prep<-factor(meta$library_type)
+  age<-meta$age_at_sample_date
+  CD4T<-meta$`CD4T_DNA`
+  CD8T<-meta$`CD8T_DNA`
+  Monocyte<-meta$`Mono_DNA`
+  NK<-meta$`NK_DNA`
+  BCells<-meta$`Bcell_DNA`
+  Neutrophil<-meta$`Neu_DNA`
+  PC1<-meta$all_PC1
+  PC2<-meta$all_PC2
+  PC3<-meta$all_PC3
+  PC4<-meta$all_PC4
+  design <- model.matrix(~group+age+sex+CD8T+Monocyte+NK+BCells+Neutrophil+PC1+PC2+PC3+PC4+batch+prep)
+  v <- voom(y3, design, plot=F)
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pval.df <- as.data.frame(efit$p.value)
+  fdr.df <- apply(pval.df, 2, p.adjust, "fdr")
+  sigGeneNum_byFDR.df <- as.data.frame(apply(fdr.df, 2, function(x){sum(x < 0.05)}))
+  tmp = topTable(efit, coef=2, n=Inf)
+  tmp = tmp[order(tmp$adj.P.Val),]
+  deg<-tmp
+  deg$diffexpressed <- "NO"
+  deg$diffexpressed[deg$logFC > 0 & deg$adj.P.Val < 0.05] <- "UP"  
+  deg$diffexpressed[deg$logFC < 0 & deg$adj.P.Val < 0.05] <- "DOWN"
+  return(list(df=df,meta=meta,tmm=tmm,efit=efit,design=design,vfit=vfit,sigGeneNum_byFDR.df=sigGeneNum_byFDR.df,deg=deg))
+}
+
+NoPC.all.list<-run_limma_voom(df=dm,meta=meta)
+```
+
+```{r,fig.width=12, fig.height=3,warning=FALSE}
+plot_mean_expression <- function(lcpm_df, library_type_vector, color_var, plot_title, legend_name) {
+  lcpm_df_TOT <- lcpm_df[, names(library_type_vector[library_type_vector == "TOT"])]
+  lcpm_df_POLY <- lcpm_df[, names(library_type_vector[library_type_vector == "POLY"])]
+
+  mean_expression_TOT <- rowMeans(lcpm_df_TOT, na.rm = TRUE)
+  mean_expression_POLY <- rowMeans(lcpm_df_POLY, na.rm = TRUE)
+
+  if (length(color_var) != nrow(lcpm_df)) {
+    stop("The length of color_var does not match the number of rows in lcpm_df")
+  }
+
+  color_var_factor <- cut(color_var, 
+                          breaks = c(-Inf, 0.05, 0.1, 0.5, Inf),
+                          labels = c("<0.05", "[0.05,0.1)", "[0.1,0.5)", ">0.5"),
+                          right = FALSE)
+
+  mean_expression_df <- data.frame(Gene = rownames(lcpm_df),
+                                   Mean_TOT = mean_expression_TOT,
+                                   Mean_POLY = mean_expression_POLY,
+                                   Color_Var = color_var_factor)  
+
+  cor_coefficient <- cor(mean_expression_df$Mean_TOT, mean_expression_df$Mean_POLY)
+
+  ggplot(mean_expression_df, aes(x = Mean_TOT, y = Mean_POLY, color = Color_Var)) +
+    geom_point(alpha = 0.5) +  
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +  
+    geom_abline(intercept = 5, slope = 1, linetype = "dashed", color = "black") +  
+    geom_abline(intercept = -5, slope = 1, linetype = "dashed", color = "black") +  
+    geom_abline(intercept = 4.5, slope = 1, linetype = "dashed", color = "black") +  
+    geom_abline(intercept = -4.5, slope = 1, linetype = "dashed", color = "black") +  
+       geom_abline(intercept = 4, slope = 1, linetype = "dashed", color = "black") +  
+    geom_abline(intercept = -4, slope = 1, linetype = "dashed", color = "black") +  
+    scale_color_manual(name = legend_name, values = c("<0.05" = "red", "[0.05,0.1)" = "orange", "[0.1,0.5)" = "yellow", ">0.5" = "blue")) +  
+    theme_minimal() +
+    labs(x = "Mean Gene Expression in TOT (log2CPM)",
+         y = "Mean Gene Expression in POLY (log2CPM)",
+         title = plot_title) +  # Dynamic plot title
+    theme(plot.title = element_text(hjust = 0.5)) +
+    annotate("text", x = Inf, y = Inf, label = sprintf("Pearson's r: %.2f", cor_coefficient), 
+             hjust = 1.1, vjust = 2, size = 5, color = "blue")
+}
+NOPC_all_df <- NoPC.all.list[["deg"]]
+NOPC_all_df_sorted <- NOPC_all_df[order(NOPC_all_df$geneid), ]
+library_type_vector <- meta$library_type
+names(library_type_vector) <- meta$Sample
+# s1<-plot_mean_expression(lcpm_df, library_type_vector, NOPC_all_df_sorted$adj.P.Val, "All w/o PCs", "FDR")
+# print(s_1)
+```
+
+Filtered out 206 library type specific genes.
+
+```{r,fig.width=12, fig.height=3,warning=FALSE}
+plot_mean_expression_filtered <- function(lcpm_df, library_type_vector, color_var, plot_title, legend_name) {
+  lcpm_df_TOT <- lcpm_df[, names(library_type_vector[library_type_vector == "TOT"])]
+  lcpm_df_POLY <- lcpm_df[, names(library_type_vector[library_type_vector == "POLY"])]
+
+  mean_expression_TOT <- rowMeans(lcpm_df_TOT, na.rm = TRUE)
+  mean_expression_POLY <- rowMeans(lcpm_df_POLY, na.rm = TRUE)
+
+  if (length(color_var) != nrow(lcpm_df)) {
+    stop("The length of color_var does not match the number of rows in lcpm_df")
+  }
+
+  # Filter out the genes based on the provided criteria
+  filter_condition <- !(mean_expression_POLY < 1.25 & mean_expression_TOT > mean_expression_POLY + 5 |
+                        mean_expression_TOT < 1.25 & mean_expression_POLY > mean_expression_TOT + 5)
+  lcpm_df <- lcpm_df[filter_condition, ]
+  mean_expression_TOT <- mean_expression_TOT[filter_condition]
+  mean_expression_POLY <- mean_expression_POLY[filter_condition]
+  color_var <- color_var[filter_condition]
+
+  color_var_factor <- cut(color_var, 
+                          breaks = c(-Inf, 0.05, 0.1, 0.5, Inf),
+                          labels = c("<0.05", "[0.05,0.1)", "[0.1,0.5)", ">0.5"),
+                          right = FALSE)
+  
+  mean_expression_df <- data.frame(Gene = rownames(lcpm_df),
+                                   Mean_TOT = mean_expression_TOT,
+                                   Mean_POLY = mean_expression_POLY,
+                                   Color_Var = color_var_factor)  # Use the categorized color_var
+
+  cor_coefficient <- cor(mean_expression_df$Mean_TOT, mean_expression_df$Mean_POLY)
+
+  ggplot(mean_expression_df, aes(x = Mean_TOT, y = Mean_POLY, color = Color_Var)) +
+    geom_point(alpha = 0.5) +  
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +  
+    geom_abline(intercept = 5, slope = 1, linetype = "dashed", color = "black") +  
+    geom_abline(intercept = -5, slope = 1, linetype = "dashed", color = "black") +  
+    scale_color_manual(name = legend_name, values = c("<0.05" = "red", "[0.05,0.1)" = "orange", "[0.1,0.5)" = "yellow", ">0.5" = "blue")) + 
+    theme_minimal() +
+    labs(x = "Mean Gene Expression in TOT (log2CPM)",
+         y = "Mean Gene Expression in POLY (log2CPM)",
+         title = plot_title) +  # Dynamic plot title
+    theme(plot.title = element_text(hjust = 0.5)) +
+    annotate("text", x = Inf, y = Inf, label = sprintf("Pearson's r: %.2f", cor_coefficient), 
+             hjust = 1.1, vjust = 2, size = 5, color = "blue")
+}
+
+# Call the modified function with the filtered data
+s4_filtered<-plot_mean_expression_filtered(lcpm_df, library_type_vector, NOPC_all_df_sorted$adj.P.Val, "No PCs (filtered)", "FDR")
+df_filtered<-s4_filtered[["data"]]
+lcpm_df_filtered<-lcpm_df[match(df_filtered$Gene,row.names(lcpm_df)),]
+lcpm_filtered<-lcpm[match(df_filtered$Gene,row.names(lcpm)),]
+
+# s1_filtered<-plot_mean_expression_filtered(lcpm_df, library_type_vector, NOPC_all_df_sorted$adj.P.Val, "All w/o PCs", "FDR")
+# print(s_1_filtered)
+```
+
+# 3. PCA based on taking residuals on raw data 
+
+Initial PCA check includes the following two sets of covariates: 
+model1 ~ 1 + age_at_sample_date + sex + CD8T_DNA + Mono_DNA + NK_DNA + Bcell_DNA + Neu_DNA + all_PC1 + all_PC2 + all_PC3 + all_PC4 + Batch + library_type
+model2 ~ 1 + age_at_sample_date + sex + all_PC1 + all_PC2 + all_PC3 + all_PC4 + Batch + library_type
+We are taking residual from the above model from raw count data and plot PCA.
+
+```{r,warning=FALSE}
+# Applying linear regression and getting residuals for each gene
+design <- model.matrix(~ 1 + age_at_sample_date + sex + CD8T_DNA + Mono_DNA + NK_DNA + Bcell_DNA + Neu_DNA + all_PC1 + all_PC2 + all_PC3 + all_PC4 + library_type + Batch, data = meta)
+
+residual_exprs <- apply(lcpm_filtered, 1, function(gene_expr) {
+  fit <- lm.fit(design, gene_expr)
+  residuals(fit)
+})
+
+#PCA
+pca_result <- prcomp(residual_exprs, center = TRUE, scale. = TRUE)
+scores <- pca_result$x
+scores_df<-as.data.frame(scores)
+scores_df$rn<-rownames(scores_df)
+scores_meta<-left_join(scores_df,meta,by=c("rn"="Sample"))
+pca_summary <- summary(pca_result)
+variance_explained <- pca_summary$importance[2, 1:20]
+# barplot(variance_explained, xlab = "Principal Component", ylab = "Proportion of Variance Explained",
+#         main = "Scree Plot of the First 20 PCs")
+```
+
+
+```{r, fig.width=15, fig.height=4,warning=FALSE}
+npg_colors <- pal_npg()(n = 2) 
+npg_colors <- rev(npg_colors)
+npg_colors3 <- pal_npg()(n = 5) 
+npg_colors3 <- npg_colors3[4:5]
+npg_colors6 <- pal_npg()(n = 9) 
+npg_colors6 <- npg_colors6[c(6,3)]
+npg_colors6L <- pal_npg()(n = 6) 
+npg_colors8 <- pal_npg()(n = 8) 
+
+plot_pcs <- function(data, pc_x, pc_y, color_var, point_colors) {
+  ggplot(data, aes(x = !!sym(pc_x), y = !!sym(pc_y), color = !!sym(color_var))) +
+    geom_point(aes(color = factor(!!sym(color_var))), size = 2) +  # Adjust size as needed
+    scale_color_manual(values = point_colors) +  # Apply custom colors from the palette
+    theme_minimal()
+}
+
+p1 <- plot_pcs(scores_meta, "PC1", "PC2", "library_type", npg_colors3)
+p2 <- plot_pcs(scores_meta, "PC1", "PC2", "sex", npg_colors6)
+p3 <- plot_pcs(scores_meta, "PC1", "PC2", "Batch", npg_colors8)
+
+p_15 <- ggarrange(p1,p2,p3,labels = c("a", "b", "c"),ncol = 3, nrow = 1)
+print(p_15)
+```
+
+
+# 4. Supplementary Figure S14. Selection of principal components for differential gene expression analysis.
+
+To correct for batch effects, RNA PCs were carefully selected by first checking correlation between top 10 PCs with other covariates in the DEG models: we checked Pearson’s linear correlation between RNA PCs with continuous variables, and Kruskal–Wallis's test between RNA PCs and categorical variables. 
+```{r, warning=FALSE}
+# Regress out subject type, sex, age
+design <- model.matrix(~ 1 + subject_type + sex + age_at_sample_date, data = meta)
+
+residual_exprs <- apply(lcpm_filtered, 1, function(gene_expr) {
+  fit <- lm.fit(design, gene_expr)
+  residuals(fit)
+})
+
+pca_result <- prcomp(residual_exprs, center = TRUE, scale. = TRUE)
+scores <- pca_result$x
+
+# Extract PC1 to PC10
+RNA_PC1 <- scores[, 1]
+RNA_PC2 <- scores[, 2]
+RNA_PC3 <- scores[, 3]
+RNA_PC4 <- scores[, 4]
+RNA_PC5 <- scores[, 5]
+RNA_PC6 <- scores[, 6]
+RNA_PC7 <- scores[, 7]
+RNA_PC8 <- scores[, 8]
+RNA_PC9 <- scores[, 9]
+RNA_PC10 <- scores[, 10]
+
+scores_df<-as.data.frame(scores)
+scores_df$rn<-rownames(scores_df)
+scores_meta<-left_join(scores_df,meta,by=c("rn"="Sample"))
+
+par(mfrow=c(1,1))
+
+pca_summary <- summary(pca_result)
+
+variance_explained <- pca_summary$importance[2, 1:50]
+plot(variance_explained, type = "b", xlab = "Principal Component", 
+    ylab = "Proportion of Variance Explained", 
+    main = "Scree Plot of the First 50 PCs")
+abline(v=10.5, col="red", lty="dashed")
+
+pc_cols   <- paste0("PC", 1:10)
+cont_var  <- "age_at_sample_date"
+cat_vars  <- c("subject_type", "library_type", "Batch", "sex")
+
+row_names <- c("age", "subject type", "library type", "batch", "sex")
+mat_p     <- matrix(NA,
+                    nrow = length(row_names),
+                    ncol = length(pc_cols),
+                    dimnames = list(row_names, pc_cols))
+
+# continuous: Pearson
+for (pc in pc_cols) {
+  tt <- cor.test(scores_meta[[cont_var]], scores_meta[[pc]], method = "pearson")
+  mat_p["age", pc] <- tt$p.value
+}
+
+# categorical: Kruskal–Wallis
+for (i in seq_along(cat_vars)) {
+  var <- cat_vars[i]
+  rn  <- row_names[i+1]
+  for (pc in pc_cols) {
+    kk <- kruskal.test(scores_meta[[pc]] ~ scores_meta[[var]])
+    mat_p[rn, pc] <- kk$p.value
+  }
+}
+
+cols <- colorRampPalette(brewer.pal(n = 7, name = "RdYlBu"))(100)
+pheatmap(mat_p, color = cols,breaks = seq(0, 1, length.out = 101), cluster_rows = FALSE, cluster_cols = FALSE, display_numbers = T, number_color = "black", fontsize_number = 10, main = "P-values: PCs vs. Covariates")
+
+```
+We also performed logistic regression adjusting for other covariates. PC1, PC3 are correlated with case control status after multiple test correction. PC1 is associated with case control status for the primary analysis (the model not fully adjusting for cell type proportions).
+
+```{r, fig.width=16, fig.height=20, warning=FALSE}
+# Functions
+extract_p_values_glm <- function(base_model_name, num_models, data) {
+  p_values_list <- list()
+  for (i in 1:num_models) {
+    # Construct the predictor variable dynamically (e.g., PC1, PC2, ..., PC10)
+    pc_variable <- paste("PC", i, sep = "")
+    # Construct the model formula dynamically
+    formula <- as.formula(paste("subject_type ~", pc_variable, "+ age_at_sample_date + sex + all_PC1 + all_PC2 + all_PC3 + all_PC4 + Batch + library_type"))
+    model <- glm(formula, data = data, family = binomial)
+    model_summary <- summary(model)
+    model_p_values <- coef(model_summary)[, "Pr(>|z|)"]
+    p_values_list[[paste(base_model_name, i, sep = "")]] <- model_p_values
+  }
+  p_values_df <- as.data.frame(do.call(cbind, p_values_list))
+  predictor_names <- names(coef(model))
+  rownames(p_values_df) <- predictor_names
+  return(p_values_df)
+}
+
+extract_p_values_glm_CellPro <- function(base_model_name, num_models, data) {
+  p_values_list <- list()
+  
+  for (i in 1:num_models) {
+    pc_variable <- paste("PC", i, sep = "")
+    formula <- as.formula(paste("subject_type ~", pc_variable, "+ age_at_sample_date + sex + all_PC1 + all_PC2 + all_PC3 + all_PC4 +  CD8T_DNA + Mono_DNA + NK_DNA + Bcell_DNA + Neu_DNA + Batch + library_type"))
+    model <- glm(formula, data = data, family = binomial)
+    model_summary <- summary(model)
+    model_p_values <- coef(model_summary)[, "Pr(>|z|)"]
+    p_values_list[[paste(base_model_name, i, sep = "")]] <- model_p_values
+  }
+  p_values_df <- as.data.frame(do.call(cbind, p_values_list))
+  predictor_names <- names(coef(model))
+  rownames(p_values_df) <- predictor_names
+  
+  return(p_values_df)
+}
+
+display_p_values_table <- function(p_values_df) {
+  datatable(p_values_df, 
+            extensions = 'Buttons',
+            options = list(
+              dom = 'Blfrtip',
+              buttons = list('copy', 'csv', 'excel', 'pdf', 'print'),
+              pageLength = 10, 
+              autoWidth = TRUE,
+              ordering = TRUE # This enables interactive column sorting
+            )) %>%
+    formatStyle(
+      columns = names(p_values_df),
+      color = 'black',
+      backgroundColor = 'white'
+    )
+}
+
+p_values_df_glm<-extract_p_values_glm("glm_pc", 10, scores_meta)
+row.names(p_values_df_glm)[2]<-"pc_i"
+adjust.pvalue<-p.adjust(p_values_df_glm[2,],method="bonferroni")
+result<-rbind(p_values_df_glm,adjust.pvalue)
+row.names(result)[dim(result)[1]]<-"adj.p"
+
+p_values_df_glm_CellPro<-extract_p_values_glm_CellPro("glm_pc", 10, scores_meta)
+row.names(p_values_df_glm_CellPro)[2]<-"pc_i"
+adjust.pvalue<-p.adjust(p_values_df_glm_CellPro[2,],method="bonferroni")
+result_CellPro<-rbind(p_values_df_glm_CellPro,adjust.pvalue)
+row.names(result_CellPro)[dim(result_CellPro)[1]]<-"adj.p"
+```
+
+```{r, fig.width=8, fig.height=2.5,warning=FALSE}
+colnames(result_CellPro)<-c("PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10")
+result_CellPro2<-result_CellPro[c(2,22),]
+rownames(result_CellPro2)<-c("p-values","Adjusted p-values")
+pheatmap(result_CellPro2, cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main="Logistic Regression with Subject Type as Outcome Variable (Adjusted Cell)", display_numbers = T, number_color="black")
+```
+```{r, fig.width=8, fig.height=2.5,warning=FALSE}
+colnames(result)<-c("PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10")
+result2<-result[c(2,17),]
+rownames(result2)<-c("p-values","Adjusted p-values")
+pheatmap(result2, cluster_rows = FALSE, cluster_cols = FALSE, color = cols, main="Logistic Regression with Subject Type as Outcome Variable (Primary Analysis)", display_numbers = T, number_color="black")
+```
+
+
+# 5. Add 8 PCs to DEG model #1 adjust for cell types. Add 9 PCs to whole blood DEG model #2 "primary analysis". Check PCA on residuals.
+
+We add PCs2,4,5,6,7,8,9,10 to the DEG model #1 (adjust for cell type compositions) to remove unknown variance. 
+
+```{r,warning=FALSE}
+runPCAResiduals <- function(design, 
+                            expr_mat, 
+                            meta_df, 
+                            join_by = c("rn" = "Sample"), 
+                            n_pcs = 50) {
+
+  residuals_mat <- apply(expr_mat, 1, function(gene_expr) {
+    fit <- lm.fit(design, gene_expr)
+    residuals(fit)
+  })
+  
+  pca_res <- prcomp(residuals_mat, center = TRUE, scale. = TRUE)
+  
+  var_exp <- summary(pca_res)$importance[2, seq_len(n_pcs)]
+  plot(var_exp, type = "b",
+       xlab = "Principal Component",
+       ylab = "Proportion of Variance Explained",
+       main = paste0("Scree Plot of the First ", n_pcs, " PCs"))
+  
+  scores_df <- as.data.frame(pca_res$x)
+  scores_df$rn <- rownames(scores_df)
+  scores_meta2 <- dplyr::left_join(scores_df, meta_df, by = join_by)
+  return(scores_meta2)
+}
+
+design1 <- model.matrix(~ 1 + age_at_sample_date + sex + CD8T_DNA + Mono_DNA + NK_DNA + Bcell_DNA + Neu_DNA + all_PC1 + all_PC2 + all_PC3 + all_PC4 + Batch + library_type +PC2+PC4+PC5+PC6 + PC7+PC8 + PC9 + PC10, data = scores_meta)
+
+scores_meta1 <- runPCAResiduals(design1, 
+                                lcpm_filtered, 
+                                meta, 
+                                join_by = c("rn" = "Sample"), 
+                                n_pcs = 50)
+```
+Response Figure R2. PCA plots for DEGs analysis adjusted for cell proportions. 
+```{r, fig.width=10, fig.height=4,warning=FALSE}
+npg_colors8 <- pal_npg()(n = 8) 
+plot_pcs_gradient <- function(data, pc_x, pc_y, color_var, custom_palette) {
+  ggplot(data, aes(x = !!sym(pc_x), y = !!sym(pc_y), color = !!sym(color_var))) +
+    geom_point(size = 2) +  # Adjust size as needed
+    scale_color_gradientn(colors = custom_palette)+
+    theme_minimal()
+}
+custom_palette <- colorRampPalette(c("red", "yellow","blue"))(n = 139)
+
+p1 <- plot_pcs_gradient(scores_meta1, "PC1", "PC2", "age_at_sample_date", custom_palette)
+p2 <- plot_pcs(scores_meta1, "PC1", "PC2", "sex", npg_colors6)
+
+p_3 <- ggarrange(p1,p2, 
+                labels = c("a", "b"),
+                ncol = 2, nrow = 1)
+print(p_3)
+```
+
+We add PCs2,3,4,5,6,7,8,9,10 to the DEG model #2 (not adjust for cell type compositions) to remove unknown variance. 
+```{r,warning=FALSE}
+design2 <- model.matrix(~ 1 + age_at_sample_date + sex + all_PC1 + all_PC2 + all_PC3 + all_PC4 + Batch + library_type + PC2 + PC3 + PC4 + PC5 + PC6 + PC7 + PC8 + PC9 + PC10, data = scores_meta)
+
+scores_meta2 <- runPCAResiduals(design2, 
+                                lcpm_filtered, 
+                                meta, 
+                                join_by = c("rn" = "Sample"), 
+                                n_pcs = 50)
+```
+Response Figure R1. PCA plots for primary DEGs analysis. 
+```{r, fig.width=10, fig.height=4,warning=FALSE}
+p11 <- plot_pcs_gradient(scores_meta2, "PC1", "PC2", "age_at_sample_date", custom_palette)
+p22 <- plot_pcs(scores_meta2, "PC1", "PC2", "sex", npg_colors6)
+
+p_33 <- ggarrange(p11,p22, 
+                labels = c("a", "b"),
+                ncol = 2, nrow = 1)
+print(p_33)
+```
+
+# 6. Supplementary Figure S14a. Heatmap of Pearson’s correlation results between RNA PCs and cell type proportions. Legend and box colors indicate Pearson’s correlation coefficients; box numbers indicate Bonferroni-adjusted p-values.
+
+```{r, warning=FALSE}
+# define PCs and cell types
+pcs        <- paste0("PC", 1:10)
+cell_types <- c("Neu","Mono","Bcell","NK","CD8T")
+
+# 1. compute raw cor and p-values
+cor_mat <- sapply(cell_types, function(ct) {
+  sapply(pcs, function(pc) {
+    cor(scores_meta[[paste0(ct, "_DNA")]], scores_meta[[pc]], use="complete.obs")
+  })
+})
+pval_mat <- sapply(cell_types, function(ct) {
+  sapply(pcs, function(pc) {
+    cor.test(scores_meta[[paste0(ct, "_DNA")]], scores_meta[[pc]])$p.value
+  })
+})
+rownames(cor_mat)  <- pcs
+rownames(pval_mat) <- pcs
+
+# 2. Bonferroni adjust across all 50 tests
+p_adj_mat <- matrix(
+  p.adjust(as.vector(pval_mat), method = "bonferroni"),
+  nrow = nrow(pval_mat), ncol = ncol(pval_mat),
+  dimnames = dimnames(pval_mat)
+)
+
+# 3. combine into a long data frame
+heatmap_df <- as.data.frame(cor_mat) %>%
+  rownames_to_column("PC") %>%
+  pivot_longer(-PC, names_to = "CellType", values_to = "r") %>%
+  mutate(
+    p_adj = as.vector(t(p_adj_mat)),
+    p_label = format(p_adj, scientific = TRUE, digits = 2)
+  )
+
+heatmap_df <- heatmap_df %>%
+  mutate(
+    PC       = factor(PC, levels = paste0("PC", 1:10)),
+    CellType = factor(CellType, levels = cell_types)    # if you also want a specific cell‐type order
+  )
+
+# write.table(heatmap_df, file="PC_CellType_corr_v2.txt", quote=F, sep="\t", row.names=F)
+
+# 4. plot heatmap of r, annotate with p_adj
+ggplot(heatmap_df, aes(x = CellType, y = PC, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = p_label), size = 3) +
+  scale_fill_gradient2(
+    low  = "blue",
+    mid  = "white",
+    high = "red",
+    midpoint = 0,
+    name = "Pearson r"
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid  = element_blank()
+  )
+
+selected_df <- heatmap_df %>%
+  filter(
+    abs(r)   > 0.25,
+    p_adj    < 0.05
+  )
+# write.table(selected_df, file="PC_CellType_corr_selv2.txt", quote=F, sep="\t", row.names=F)
+
+```
+
+
+# 7. Include PCs in DEG models, check DEG w/ and w/o adjusting for cell type compositions.
+
+```{r, fig.width=12, fig.height=4, warning=FALSE}
+run_limma_voom_PC <- function(df,meta) {
+  dm<-df[, match(meta$Sample,colnames(df))]
+  genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+  gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+  colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+  genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+  target<-row.names(df)
+  genes <- genes[match(target,genes$geneid),]
+  samplenames <- factor(meta$Sample)
+  group <- factor(meta$subject_type, levels = c("control", "case"))
+  dm3<-as.matrix(dm)
+  y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+  y3 <- calcNormFactors(y, method = "TMM")
+  tmm <- cpm(y3)
+  tmmLog2<-log2(tmm+1)
+  
+  #DE
+  sex<-factor(meta$sex)
+  batch<-factor(meta$Batch, levels = c("Run5","pilot","Run1","Run2","Run3","Run4","Run6", "Run789"))
+  prep<-factor(meta$library_type)
+  age<-meta$age_at_sample_date
+  CD4T<-meta$`CD4T_DNA`
+  CD8T<-meta$`CD8T_DNA`
+  Monocyte<-meta$`Mono_DNA`
+  NK<-meta$`NK_DNA`
+  BCells<-meta$`Bcell_DNA`
+  Neutrophil<-meta$`Neu_DNA`
+  PC1<-meta$all_PC1
+  PC2<-meta$all_PC2
+  PC3<-meta$all_PC3
+  PC4<-meta$all_PC4
+  RNA_PC1 <- meta$PC1
+  RNA_PC2 <- meta$PC2
+  RNA_PC3 <- meta$PC3
+  RNA_PC4 <- meta$PC4
+  RNA_PC5 <- meta$PC5
+  RNA_PC6 <- meta$PC6
+  RNA_PC7 <- meta$PC7
+  RNA_PC8 <- meta$PC8
+  RNA_PC9 <- meta$PC9
+  RNA_PC10 <- meta$PC10
+  design <- model.matrix(~group+age+sex+CD8T+Monocyte+NK+BCells+Neutrophil+PC1+PC2+PC3+PC4+batch+prep+RNA_PC2+RNA_PC4+RNA_PC5+RNA_PC6+RNA_PC7+RNA_PC8+RNA_PC9+RNA_PC10)
+  v <- voom(y3, design, plot=F)
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pval.df <- as.data.frame(efit$p.value)
+  fdr.df <- apply(pval.df, 2, p.adjust, "fdr")
+  sigGeneNum_byFDR.df <- as.data.frame(apply(fdr.df, 2, function(x){sum(x < 0.05)}))
+  tmp = topTable(efit, coef=2, n=Inf)
+  tmp = tmp[order(tmp$adj.P.Val),]
+  deg<-tmp 
+  deg$diffexpressed <- "NO"
+  deg$diffexpressed[deg$logFC > 0 & deg$adj.P.Val < 0.05] <- "UP"  
+  deg$diffexpressed[deg$logFC < 0 & deg$adj.P.Val < 0.05] <- "DOWN"
+  return(list(df=df,meta=meta,tmm=tmm,efit=efit,design=design,vfit=vfit,sigGeneNum_byFDR.df=sigGeneNum_byFDR.df,deg=deg))
+}
+
+run_limma_voom_sex_stratified_PC <- function(df,meta) {
+  dm<-df[, match(meta$Sample,colnames(df))]
+  genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+  gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+  colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+  genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+  target<-row.names(df)
+  genes <- genes[match(target,genes$geneid),]
+  samplenames <- factor(meta$Sample)
+  group <- factor(meta$subject_type, levels = c("control", "case"))
+  dm3<-as.matrix(dm)
+  y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+  y3 <- calcNormFactors(y, method = "TMM")
+  tmm <- cpm(y3)
+  tmmLog2<-log2(tmm+1)
+  
+  #DE
+  batch<-factor(meta$Batch, levels = c("Run5","pilot","Run1","Run2","Run3","Run4","Run6", "Run789"))
+  prep<-factor(meta$library_type)
+  age<-meta$age_at_sample_date
+  CD4T<-meta$`CD4T_DNA`
+  CD8T<-meta$`CD8T_DNA`
+  Monocyte<-meta$`Mono_DNA`
+  NK<-meta$`NK_DNA`
+  BCells<-meta$`Bcell_DNA`
+  Neutrophil<-meta$`Neu_DNA`
+  PC1<-meta$all_PC1
+  PC2<-meta$all_PC2
+  PC3<-meta$all_PC3
+  PC4<-meta$all_PC4
+  RNA_PC1 <- meta$PC1
+  RNA_PC2 <- meta$PC2
+  RNA_PC3 <- meta$PC3
+  RNA_PC4 <- meta$PC4
+  RNA_PC5 <- meta$PC5
+  RNA_PC6 <- meta$PC6
+  RNA_PC7 <- meta$PC7
+  RNA_PC8 <- meta$PC8
+  RNA_PC9 <- meta$PC9
+  RNA_PC10 <- meta$PC10
+  design <- model.matrix(~group+age+CD8T+Monocyte+NK+BCells+Neutrophil+PC1+PC2+PC3+PC4+batch+prep+RNA_PC2+RNA_PC4+RNA_PC5+RNA_PC6+RNA_PC7+RNA_PC8+RNA_PC9+RNA_PC10)
+  v <- voom(y3, design, plot=F)
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pval.df <- as.data.frame(efit$p.value)
+  fdr.df <- apply(pval.df, 2, p.adjust, "fdr")
+  sigGeneNum_byFDR.df <- as.data.frame(apply(fdr.df, 2, function(x){sum(x < 0.05)}))
+  tmp = topTable(efit, coef=2, n=Inf)
+  tmp = tmp[order(tmp$adj.P.Val),]
+  deg<-tmp 
+  deg$diffexpressed <- "NO"
+  deg$diffexpressed[deg$logFC > 0 & deg$adj.P.Val < 0.05] <- "UP"  
+  deg$diffexpressed[deg$logFC < 0 & deg$adj.P.Val < 0.05] <- "DOWN"
+  return(list(df=df,meta=meta,tmm=tmm,efit=efit,design=design,vfit=vfit,sigGeneNum_byFDR.df=sigGeneNum_byFDR.df,deg=deg))
+}
+
+colnames(scores_meta)[695]<-"Sample"
+scores_meta_m<-filter(scores_meta,sex=="M")
+scores_meta_f<-filter(scores_meta,sex=="F")
+df_filtered<-s4_filtered[["data"]]
+dm_filtered<-dm[match(df_filtered$Gene,row.names(dm)),]
+all.list<-run_limma_voom_PC(dm_filtered,meta=scores_meta)
+male.list<-run_limma_voom_sex_stratified_PC(dm_filtered,meta=scores_meta_m)
+female.list<-run_limma_voom_sex_stratified_PC(dm_filtered,meta=scores_meta_f)
+
+source('./CaseVSControl/sample694/RNA_PC_regress/volcano_plot.R')
+PC8_p_value<-extract_p_value(all.list[["deg"]])
+PC8_all<-generate_volcano_plot_p(all.list[["deg"]],PC8_p_value, plot_title="All w/Cell Adj", y_lim = 50)
+PC8_male_p_value<-extract_p_value(male.list[["deg"]])
+PC8_male<-generate_volcano_plot_p(male.list[["deg"]],PC8_male_p_value, plot_title="Males w/Cell Adj",y_lim=50)
+PC8_female_p_value<-extract_p_value(female.list[["deg"]])
+PC8_female<-generate_volcano_plot_p(female.list[["deg"]],PC8_female_p_value, plot_title="Females w/Cell Adj", y_lim = 50)
+p_PC8_3 <- ggarrange(PC8_all, PC8_male, PC8_female, ncol = 3)
+# print(p_PC8_3)
+```
+To compare DEGs between primary analysis and with cell proportion adjustment.
+
+```{r, fig.width=12, fig.height=8, warning=FALSE}
+run_limma_voom_PC_nocellpro <- function(df,meta) {
+  dm<-df[, match(meta$Sample,colnames(df))]
+  genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+  gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+  colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+  genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+  target<-row.names(df)
+  genes <- genes[match(target,genes$geneid),]
+  samplenames <- factor(meta$Sample)
+  group <- factor(meta$subject_type, levels = c("control", "case"))
+  dm3<-as.matrix(dm)
+  y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+  y3 <- calcNormFactors(y, method = "TMM")
+  tmm <- cpm(y3)
+  tmmLog2<-log2(tmm+1)
+  
+  #DE
+  sex<-factor(meta$sex)
+  batch<-factor(meta$Batch, levels = c("Run5","pilot","Run1","Run2","Run3","Run4","Run6", "Run789"))
+  prep<-factor(meta$library_type)
+  age<-meta$age_at_sample_date
+  CD4T<-meta$`CD4T_DNA`
+  CD8T<-meta$`CD8T_DNA`
+  Monocyte<-meta$`Mono_DNA`
+  NK<-meta$`NK_DNA`
+  BCells<-meta$`Bcell_DNA`
+  Neutrophil<-meta$`Neu_DNA`
+  PC1<-meta$all_PC1
+  PC2<-meta$all_PC2
+  PC3<-meta$all_PC3
+  PC4<-meta$all_PC4
+  RNA_PC1 <- meta$PC1
+  RNA_PC2 <- meta$PC2
+  RNA_PC3 <- meta$PC3
+  RNA_PC4 <- meta$PC4
+  RNA_PC5 <- meta$PC5
+  RNA_PC6 <- meta$PC6
+  RNA_PC7 <- meta$PC7
+  RNA_PC8 <- meta$PC8
+  RNA_PC9 <- meta$PC9
+  RNA_PC10 <- meta$PC10
+  design <- model.matrix(~group+age+sex+PC1+PC2+PC3+PC4+batch+prep+RNA_PC2+RNA_PC3+RNA_PC4+RNA_PC5+RNA_PC6+RNA_PC7+RNA_PC8+RNA_PC9+RNA_PC10)
+  v <- voom(y3, design, plot=F)
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pval.df <- as.data.frame(efit$p.value)
+  fdr.df <- apply(pval.df, 2, p.adjust, "fdr")
+  sigGeneNum_byFDR.df <- as.data.frame(apply(fdr.df, 2, function(x){sum(x < 0.05)}))
+  tmp = topTable(efit, coef=2, n=Inf)
+  tmp = tmp[order(tmp$adj.P.Val),]
+  deg<-tmp 
+  deg$diffexpressed <- "NO"
+  deg$diffexpressed[deg$logFC > 0 & deg$adj.P.Val < 0.05] <- "UP"  
+  deg$diffexpressed[deg$logFC < 0 & deg$adj.P.Val < 0.05] <- "DOWN"
+  return(list(df=df,meta=meta,tmm=tmm,efit=efit,design=design,vfit=vfit,sigGeneNum_byFDR.df=sigGeneNum_byFDR.df,deg=deg))
+}
+
+run_limma_voom_sex_stratified_PC_nocellpro <- function(df,meta) {
+  dm<-df[, match(meta$Sample,colnames(df))]
+  genelen <- read.table("featurecounts_length.txt", sep="\t", header=T, stringsAsFactors = F)
+  gene_anno <- read.table("geneID_genename_biotypes.txt", sep="\t", header=F, stringsAsFactors = F)
+  colnames(gene_anno) <- c("geneid", "gene_symbol","biotype")
+  genes <- left_join(gene_anno, genelen, by = c("geneid" = "gene_id"))
+  target<-row.names(df)
+  genes <- genes[match(target,genes$geneid),]
+  samplenames <- factor(meta$Sample)
+  group <- factor(meta$subject_type, levels = c("control", "case"))
+  dm3<-as.matrix(dm)
+  y <- DGEList(counts = dm3, group=group, genes=genes, samples=samplenames)
+  y3 <- calcNormFactors(y, method = "TMM")
+  tmm <- cpm(y3)
+  tmmLog2<-log2(tmm+1)
+  
+  #DE
+  batch<-factor(meta$Batch, levels = c("Run5","pilot","Run1","Run2","Run3","Run4","Run6", "Run789"))
+  prep<-factor(meta$library_type)
+  age<-meta$age_at_sample_date
+  CD4T<-meta$`CD4T_DNA`
+  CD8T<-meta$`CD8T_DNA`
+  Monocyte<-meta$`Mono_DNA`
+  NK<-meta$`NK_DNA`
+  BCells<-meta$`Bcell_DNA`
+  Neutrophil<-meta$`Neu_DNA`
+  PC1<-meta$all_PC1
+  PC2<-meta$all_PC2
+  PC3<-meta$all_PC3
+  PC4<-meta$all_PC4
+  RNA_PC1 <- meta$PC1
+  RNA_PC2 <- meta$PC2
+  RNA_PC3 <- meta$PC3
+  RNA_PC4 <- meta$PC4
+  RNA_PC5 <- meta$PC5
+  RNA_PC6 <- meta$PC6
+  RNA_PC7 <- meta$PC7
+  RNA_PC8 <- meta$PC8
+  RNA_PC9 <- meta$PC9
+  RNA_PC10 <- meta$PC10
+  design <- model.matrix(~group+age+PC1+PC2+PC3+PC4+batch+prep+RNA_PC2+RNA_PC3+RNA_PC4+RNA_PC5+RNA_PC6+RNA_PC7+RNA_PC8+RNA_PC9+RNA_PC10)
+  v <- voom(y3, design, plot=F)
+  vfit <- lmFit(v, design)
+  efit <- eBayes(vfit)
+  pval.df <- as.data.frame(efit$p.value)
+  fdr.df <- apply(pval.df, 2, p.adjust, "fdr")
+  sigGeneNum_byFDR.df <- as.data.frame(apply(fdr.df, 2, function(x){sum(x < 0.05)}))
+  tmp = topTable(efit, coef=2, n=Inf)
+  tmp = tmp[order(tmp$adj.P.Val),]
+  deg<-tmp
+  deg$diffexpressed <- "NO"
+  deg$diffexpressed[deg$logFC > 0 & deg$adj.P.Val < 0.05] <- "UP"  
+  deg$diffexpressed[deg$logFC < 0 & deg$adj.P.Val < 0.05] <- "DOWN"
+  return(list(df=df,meta=meta,tmm=tmm,efit=efit,design=design,vfit=vfit,sigGeneNum_byFDR.df=sigGeneNum_byFDR.df,deg=deg))
+}
+
+colnames(scores_meta)[695]<-"Sample"
+scores_meta_m<-filter(scores_meta,sex=="M")
+scores_meta_f<-filter(scores_meta,sex=="F")
+df_filtered<-s4_filtered[["data"]]
+dm_filtered<-dm[match(df_filtered$Gene,row.names(dm)),]
+NoCellPro.PC9.all.list<-run_limma_voom_PC_nocellpro(dm_filtered,meta=scores_meta)
+NoCellPro.PC9.male.list<-run_limma_voom_sex_stratified_PC_nocellpro(dm_filtered,meta=scores_meta_m)
+NoCellPro.PC9.female.list<-run_limma_voom_sex_stratified_PC_nocellpro(dm_filtered,meta=scores_meta_f)
+
+source('./CaseVSControl/sample694/RNA_PC_regress/volcano_plot.R')
+NoCellPro_PC9_p_value<-extract_p_value(NoCellPro.PC9.all.list[["deg"]])
+NoCellPro_PC9_all<-generate_volcano_plot_p(NoCellPro.PC9.all.list[["deg"]],NoCellPro_PC9_p_value, plot_title="All Primary Analysis", y_lim = 50)
+NoCellPro_PC9_male_p_value<-extract_p_value(NoCellPro.PC9.male.list[["deg"]])
+NoCellPro_PC9_male<-generate_volcano_plot_p(NoCellPro.PC9.male.list[["deg"]],NoCellPro_PC9_male_p_value, plot_title="Males Primary Analysis",y_lim=50)
+NoCellPro_PC9_female_p_value<-extract_p_value(NoCellPro.PC9.female.list[["deg"]])
+NoCellPro_PC9_female<-generate_volcano_plot_p(NoCellPro.PC9.female.list[["deg"]],NoCellPro_PC9_female_p_value, plot_title="Females Primary Analysis", y_lim = 50)
+NoCellPro_p_PC9_6 <- ggarrange(NoCellPro_PC9_all, NoCellPro_PC9_male, NoCellPro_PC9_female, PC8_all, PC8_male, PC8_female, ncol = 3, nrow=2)
+print(NoCellPro_p_PC9_6)
+
+```
+
+# 8. Supplementary Figure S16. Overlap of differentially expressed genes (DEGs) in ALS versus control blood samples in primary analyses and analyses adjusted for cell proportions.
+
+```{r,fig.width=15, fig.height=5,warning=FALSE}
+PC8_f_df <- female.list[["deg"]]
+PC8_m_df <- male.list[["deg"]]
+PC8_all_df <- all.list[["deg"]]
+NoCellPro.PC9.all_df<-NoCellPro.PC9.all.list[["deg"]]
+NoCellPro.PC9.male_df<-NoCellPro.PC9.male.list[["deg"]]
+NoCellPro.PC9.female_df<-NoCellPro.PC9.female.list[["deg"]]
+PC8_deg_df<-PC8_all_df
+PC8_deg_df$diffexpressed<-"NO"
+PC8_deg_df$diffexpressed[PC8_deg_df$logFC > 0.1 & PC8_deg_df$adj.P.Val < 0.01] <- "UP"  
+PC8_deg_df$diffexpressed[PC8_deg_df$logFC < -0.1 & PC8_deg_df$adj.P.Val < 0.01] <- "DOWN"
+table(PC8_deg_df$diffexpressed)
+NoCellPro_PC9_deg_df<-NoCellPro.PC9.all_df
+NoCellPro_PC9_deg_df$diffexpressed<-"NO"
+NoCellPro_PC9_deg_df$diffexpressed[NoCellPro_PC9_deg_df$logFC > 0.1 & NoCellPro_PC9_deg_df$adj.P.Val < 0.01] <- "UP"  
+NoCellPro_PC9_deg_df$diffexpressed[NoCellPro_PC9_deg_df$logFC < -0.1 & NoCellPro_PC9_deg_df$adj.P.Val < 0.01] <- "DOWN"
+table(NoCellPro_PC9_deg_df$diffexpressed)
+
+par(mfrow=c(1,3))
+compare.list<-list()
+compare.list[["adjusted"]]<-unique(PC8_deg_df[which(PC8_deg_df$diffexpressed!="NO"),"geneid"])
+compare.list[["unadjusted"]]<-unique(NoCellPro_PC9_deg_df[which(NoCellPro_PC9_deg_df$diffexpressed!="NO"),"geneid"])
+venn(compare.list)
+
+compare.list2<-list()
+compare.list2[["adjusted"]]<-PC8_deg_df[which(PC8_deg_df$diffexpressed=="UP"),"geneid"]
+compare.list2[["unadjusted"]]<-NoCellPro_PC9_deg_df[which(NoCellPro_PC9_deg_df$diffexpressed=="UP"),"geneid"]
+venn(compare.list2)
+
+compare.list3<-list()
+compare.list3[["adjusted"]]<-PC8_deg_df[which(PC8_deg_df$diffexpressed=="DOWN"),"geneid"]
+compare.list3[["unadjusted"]]<-NoCellPro_PC9_deg_df[which(NoCellPro_PC9_deg_df$diffexpressed=="DOWN"),"geneid"]
+venn(compare.list3)
+
+fisher_overlap_summary <- function(a, b, c, d) {
+  # a: DEG in both adjusted and primary
+  # b: DEG in adjusted only
+  # c: DEG in primary only
+  # d: Not DEG in either
+  
+  # Create contingency table
+  table_matrix <- matrix(c(a, b, c, d), nrow = 2, byrow = TRUE,
+                         dimnames = list(
+                           "Adjusted_DEG" = c("DEG", "Not_DEG"),
+                           "Primary_DEG"  = c("DEG", "Not_DEG")
+                         ))
+  
+  # Fisher's exact test
+  fisher_result <- fisher.test(table_matrix)
+  
+  # Jaccard index (overlap score)
+  jaccard_index <- a / (a + b + c)
+  
+  # Output summary
+  list(
+    table = table_matrix,
+    p_value = fisher_result$p.value,
+    odds_ratio = fisher_result$estimate,
+    conf_int = fisher_result$conf.int,
+    jaccard_index = jaccard_index
+  )
+}
+
+# Input values
+a <- 2141  # DEG in both
+b <- 1308  # DEG in adjusted only
+c <- 1499  # DEG in primary only
+d <- 17383 # Not DEG in either
+
+# Run function
+result <- fisher_overlap_summary(a, b, c, d)
+
+# View results
+print(result)
+
+# Input values
+a <- 1174  # DEG in both
+b <- 625  # DEG in adjusted only
+c <- 825  # DEG in primary only
+d <- 22332-a-b-c # Not DEG in either
+
+# Run function
+result_up <- fisher_overlap_summary(a, b, c, d)
+
+# View results
+print(result_up)
+
+# Input values
+a <- 967  # DEG in both
+b <- 683  # DEG in adjusted only
+c <- 674  # DEG in primary only
+d <- 22332-a-b-c # Not DEG in either
+
+# Run function
+result_down <- fisher_overlap_summary(a, b, c, d)
+
+# View results
+print(result_down)
+
+
+```
+# 9. PCA check using surrogate variables
+
+```{r,fig.width=16,fig.height=20,warning=FALSE}
+load("C:/Users/yuedz/OneDrive - Michigan Medicine/Documents/svobj.rda")
+scores_meta3<-cbind.data.frame(scores_meta, svobj$sv)
+colnames(scores_meta3)[(ncol(scores_meta3)-1):ncol(scores_meta3)]<-c("SV1", "SV2")
+```
+
+```{r,warning=FALSE}
+design <- model.matrix(~ 1 + age_at_sample_date + sex + CD8T_DNA + Mono_DNA + NK_DNA + Bcell_DNA + Neu_DNA + all_PC1 + all_PC2 + all_PC3 + all_PC4 + SV1+SV2, data = scores_meta3)
+
+residual_exprs <- apply(lcpm_filtered, 1, function(gene_expr) {
+  fit <- lm.fit(design, gene_expr)
+  residuals(fit)
+})
+
+pca_result <- prcomp(residual_exprs, center = TRUE, scale. = TRUE)
+scores <- pca_result$x
+scores_df<-as.data.frame(scores)
+scores_df$rn<-rownames(scores_df)
+scores_meta4<-left_join(scores_df,meta,by=c("rn"="Sample"))
+par(mfrow=c(1,1))
+
+pca_summary <- summary(pca_result)
+variance_explained <- pca_summary$importance[2, 1:50]
+# plot(variance_explained, type = "b", xlab = "Principal Component", 
+#     ylab = "Proportion of Variance Explained", 
+#     main = "Scree Plot of the First 50 PCs")
+```
+
+```{r, fig.width=10, fig.height=4,warning=FALSE}
+plot_pcs <- function(data, pc_x, pc_y, color_var, point_colors) {
+  ggplot(data, aes(x = !!sym(pc_x), y = !!sym(pc_y), color = !!sym(color_var))) +
+    geom_point(aes(color = factor(!!sym(color_var))), size = 2) +  # Adjust size as needed
+    scale_color_manual(values = point_colors) +  # Apply custom colors from the palette
+    labs(x = pc_x, y = pc_y, title = paste(pc_x, "vs", pc_y, "w/SVs"), color = color_var) +
+    theme_minimal()
+}
+
+plot_pcs2 <- function(data, pc_x, pc_y, color_var, point_colors) {
+  ggplot(data, aes(x = !!sym(pc_x), y = !!sym(pc_y), color = !!sym(color_var))) +
+    geom_point(aes(color = factor(!!sym(color_var))), size = 2) +  # Adjust size as needed
+    scale_color_manual(values = point_colors) +  # Apply custom colors from the palette
+    labs(x = pc_x, y = pc_y, title = paste(pc_x, "vs", pc_y, "w/PCs"), color = color_var) +
+    theme_minimal()
+}
+
+p11_SVA <- plot_pcs(scores_meta4, "PC1", "PC2", "library_type", npg_colors3)
+p11_PC <- plot_pcs2(scores_meta2, "PC1", "PC2", "library_type", npg_colors3)
+
+
+p_S1 <- ggarrange(p11_SVA,p11_PC, 
+                labels = c("A", "B"),
+                ncol = 2, nrow = 1)
+print(p_S1)
+```
+
+# 10. List for wet lab qPCR validation
+
+Starting with no cell type proportion adjustment DEG list:
+selection criteria:
+1) FDR<0.01; 2) logFC>0.2; 3) AveExpr > 0; 4) Sig in both male and female; 5) Sig in both w/ and w/o cell proportion adjustment; 6) Sig in Wilcox test.
+
+```{r,fig.width=12, fig.height=15, warning=FALSE}
+NoCellPro.PC8.all.df<-NoCellPro.PC9.all.list[["deg"]]
+NoCellPro.PC8.male.df<-NoCellPro.PC9.male.list[["deg"]]
+NoCellPro.PC8.female.df<-NoCellPro.PC9.female.list[["deg"]]
+# 1) FDR<0.01; 2) logFC>0.2; 3) AveExpr > 0
+deg.select<- NoCellPro.PC8.all.df %>% filter(adj.P.Val<0.01) %>% filter(abs(logFC)>0.2) %>% filter(AveExpr>0)
+
+# 4) add male_p, female_p, male_FDR, female_FDR
+deg.select2<-deg.select%>%left_join(NoCellPro.PC8.male.df[,c("geneid", "logFC","AveExpr","P.Value","adj.P.Val")], by="geneid" )%>%left_join(NoCellPro.PC8.female.df[,c("geneid", "logFC","AveExpr","P.Value","adj.P.Val")], by="geneid" )
+colnames(deg.select2)<- gsub("\\.x", ".all", colnames(deg.select2))
+colnames(deg.select2)<- gsub("\\.y", ".male", colnames(deg.select2))
+colnames(deg.select2)[16:19]<-c("logFC.female","AveExpr.female","P.Value.female","adj.P.Val.female")
+
+# 5) add CellPro_p, CellPro_male_p, CellPro_female_p, CellPro_FDR, CellPro_male_FDR, CellPro_female_FDR
+deg.select2b<-deg.select2%>% left_join(PC8_all_df[,c("geneid", "logFC","AveExpr","P.Value","adj.P.Val")], by="geneid" )
+deg.select2c<-deg.select2b%>% left_join(PC8_m_df[,c("geneid", "logFC","AveExpr","P.Value","adj.P.Val")], by="geneid" )
+deg.select2d<-deg.select2c%>% left_join(PC8_f_df[,c("geneid", "logFC","AveExpr","P.Value","adj.P.Val")], by="geneid" )
+colnames(deg.select2d)<- gsub("\\.x", ".all.CellPro", colnames(deg.select2d))
+colnames(deg.select2d)<- gsub("\\.y", ".male.CellPro", colnames(deg.select2d))
+colnames(deg.select2d)[28:31]<-c("logFC.female.CellPro","AveExpr.female.CellPro","P.Value.female.CellPro","adj.P.Val.female.CellPro")
+
+# 6) Wilcox test
+AddWilcox <- function(meta, lcpm_filtered, deg.PCR9) {
+  if (!all(colnames(lcpm_filtered) == meta$Sample)) {
+    stop("Sample names do not match!")
+  }
+  design <- model.matrix(~ 1 + Batch + library_type + PC2 + PC4 + PC5, data = meta)
+  residual_exprs <- apply(lcpm_filtered, 1, function(gene_expr) {
+    fit <- lm.fit(design, gene_expr)
+    residuals(fit)
+  })
+  residual_exprs <- t(residual_exprs)
+  residual_df <- as.data.frame(residual_exprs)
+  residual_df$geneid <- row.names(residual_df)
+  
+  meta <- meta[order(meta$subject_type, decreasing = TRUE), ]
+  num_cases <- sum(meta$subject_type == "case")
+  num_controls <- sum(meta$subject_type == "control")
+  
+  residual_df_order <- residual_df[, match(meta$Sample, colnames(residual_df))]
+  residual_df_order$geneid <- row.names(residual_df_order)
+  
+  deg.PCR12 <- dplyr::left_join(deg.PCR9, residual_df_order, by = c("geneid"))
+  
+  deg.PCR12$wilcox_p <- NA
+  
+  deg.PCR12_up <- dplyr::filter(deg.PCR12, diffexpressed == 'UP')
+  deg.PCR12_down <- dplyr::filter(deg.PCR12, diffexpressed == 'DOWN')
+
+  for (i in 1:nrow(deg.PCR12)) {
+    gene_values <- deg.PCR12[i, (ncol(deg.PCR9)+1):(ncol(deg.PCR12)-1)]
+    control_values <- t(gene_values[(num_cases+1):ncol(gene_values)])
+    case_values <- t(gene_values[1:num_cases])
+    
+    test_result <- wilcox.test(control_values, case_values)
+    
+    deg.PCR12$wilcox_p[i] <- test_result$p.value
+  }
+  
+  # Wilcoxon test for upregulated genes
+  for (i in 1:nrow(deg.PCR12_up)) {
+    gene_values <- deg.PCR12_up[i, (ncol(deg.PCR9)+1):(ncol(deg.PCR12_up)-1)]
+    control_values <- t(gene_values[(num_cases+1):ncol(gene_values)])
+    case_values <- t(gene_values[1:num_cases])
+    
+    test_result <- wilcox.test(control_values, case_values, alternative = "less")
+    deg.PCR12_up$wilcox_p[i] <- test_result$p.value
+  }
+  
+  # Wilcoxon test for downregulated genes
+  for (i in 1:nrow(deg.PCR12_down)) {
+    gene_values <- deg.PCR12_down[i, (ncol(deg.PCR9)+1):(ncol(deg.PCR12_down)-1)]
+    control_values <- t(gene_values[(num_cases+1):ncol(gene_values)])
+    case_values <- t(gene_values[1:num_cases])
+    
+    test_result <- wilcox.test(control_values, case_values, alternative = "greater")
+    deg.PCR12_down$wilcox_p[i] <- test_result$p.value
+  }
+
+  deg.PCR12 <- dplyr::bind_rows(deg.PCR12_up, deg.PCR12_down)
+  
+  deg.PCR12.save <- deg.PCR12[, c(1:ncol(deg.PCR9), ncol(deg.PCR12))]
+  deg.PCR12.save$wilcox_adjust_Bon <- p.adjust(deg.PCR12.save$wilcox_p, method = "bonferroni")
+  
+  return(deg.PCR12.save)
+}
+
+deg.select.w<-AddWilcox(scores_meta, lcpm_filtered, deg.select2d)
+
+
+# 7) add Literature notation
+DEG_2011_ALS_S1 <- read_excel("~/Project/ALS/paper/Microarray analysis of peripheral blood lymphocytes from ALS patients and the SAFE detection of the KEGG ALS pathway/DEG_2011_ALS-S1.XLS")
+n397_DEG_2018 <- read_excel("~/Project/ALS/paper/2019_ALS_transcriptome/2018 n397 paper/n397_DEG_2018.xlsx")
+DEG_up_list <- read_excel("~/Project/ALS/paper/2019_ALS_transcriptome/DEG_list.xlsx",sheet = "(A) Inc DEGs")
+DEG_down_list <- read_excel("~/Project/ALS/paper/2019_ALS_transcriptome/DEG_list.xlsx",sheet = "(B) Dec DEGs")
+DEG_2023<-read_excel("~/Project/ALS/paper/2023_ALS_transcriptome/DEG_2023.xlsx")
+DEG_2023<-filter(DEG_2023,padj.BH<0.05)
+
+DEG_2011<-DEG_2011_ALS_S1 #Symbol
+DEG_2018<-n397_DEG_2018 #Symbol
+DEG_2019<-rbind.data.frame(DEG_up_list,DEG_down_list) #Symbol
+DEG_2023<-DEG_2023 #Gene_Symbol
+
+deg.select.w$Literature <- ""
+
+# Function to append literature if a gene symbol is found in a specific dataframe
+append_literature <- function(df, gene_col, literature_name, target_df) {
+  # Check if each gene symbol in target_df is in df
+  in_literature <- target_df$gene_symbol %in% df[[gene_col]]
+  new_df<-target_df
+  # Append the literature name to the Literature column where appropriate
+  new_df$Literature[in_literature] <- ifelse(nchar(target_df$Literature[in_literature]) == 0, 
+                                                literature_name, 
+                                                paste(target_df$Literature[in_literature], literature_name, sep = ","))
+  return(new_df)
+}
+
+# Check and append literature for each DEG dataframe
+deg.select4<-append_literature(DEG_2011, "Symbol", "DEG_2011", deg.select.w)
+deg.select5<-append_literature(DEG_2018, "Symbol", "DEG_2018", deg.select4)
+deg.select6<-append_literature(DEG_2019, "Symbol", "DEG_2019", deg.select5)
+deg.select7<-append_literature(DEG_2023, "Gene_Symbol", "DEG_2023", deg.select6)
+```
+
+
