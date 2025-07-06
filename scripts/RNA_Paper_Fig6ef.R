@@ -1,11 +1,7 @@
 ###############################################################################
-# TDP-43 and Polymyositis (PM) Drug-Gene Network Analysis
+# TDP-43 and postmortem spinal cord (PM) and blood core genes drug connectivity analysis 
 # Author: Kai Guo
 # Date: 2024-12-19
-#
-# This script performs comprehensive analysis of drug-gene interactions for:
-# 1. TDP-43 proteinopathy (ALS/FTD related)
-# 2. Polymyositis (PM) inflammatory condition
 #
 # Key analyses include:
 # - Differential expression filtering
